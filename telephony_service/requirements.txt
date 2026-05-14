@@ -1,4 +1,4 @@
-pyvoip==1.6.8
+pyVoIP==1.6.8
 requests
 scipy
 webrtcvad-wheels

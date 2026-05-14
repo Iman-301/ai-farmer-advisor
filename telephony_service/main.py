@@ -10,7 +10,7 @@ from typing import Optional
 import numpy as np
 from scipy.signal import resample_poly
 import webrtcvad
-from pyvoip.SIP import SIPClient, CallState
+from pyVoIP.VoIP import VoIPPhone, VoIPCall, CallState
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("telephony_service")
@@ -23,7 +23,20 @@ SAVE_RECORD_URL = os.environ.get("SAVE_RECORD_URL", "http://logic_service:8000/s
 TTS_URL = os.environ.get("TTS_URL", "http://tts_service:8000/synthesize")
 
 # ── SIP Config ────────────────────────────────────────────────────────────────
-SIP_IP = os.environ.get("SIP_IP", "0.0.0.0")
+# SIP_SERVER = registrar / PBX (REGISTER + INVITE reply destination).
+# SIP_BIND  = local UDP bind (often 0.0.0.0 in Docker).
+# Legacy: if only SIP_IP is set to a real host (not 0.0.0.0), use it as SIP_SERVER.
+_sip_ip_legacy = os.environ.get("SIP_IP", "")
+if os.environ.get("SIP_SERVER"):
+    SIP_SERVER = os.environ["SIP_SERVER"]
+elif _sip_ip_legacy and _sip_ip_legacy not in ("0.0.0.0", "::", "0.0.0.0/0"):
+    SIP_SERVER = _sip_ip_legacy
+else:
+    SIP_SERVER = "127.0.0.1"
+
+SIP_BIND = os.environ.get("SIP_BIND") or (
+    _sip_ip_legacy if _sip_ip_legacy in ("0.0.0.0", "::", "0.0.0.0/0") else "0.0.0.0"
+)
 SIP_PORT = int(os.environ.get("SIP_PORT", 5060))
 SIP_USER = os.environ.get("SIP_USER", "advisor")
 SIP_PASS = os.environ.get("SIP_PASS", "password")
@@ -67,13 +80,41 @@ def synthesize_text(text: str, prefix: str = "tts") -> Optional[str]:
     return None
 
 
-def _play_and_cleanup(call, filepath: Optional[str]):
+def stream_wav_to_voip_call(call: VoIPCall, filepath: str) -> None:
+    """
+    Stream a mono/stereo 16-bit WAV to pyVoIP (linear PCM @ 8 kHz for write_audio).
+    Paces chunks at ~20 ms to match telephony frame timing.
+    """
+    with wave.open(filepath, "rb") as wf:
+        nch = wf.getnchannels()
+        sw = wf.getsampwidth()
+        rate = wf.getframerate()
+        nframes = wf.getnframes()
+        if sw != 2:
+            logger.warning(f"Unsupported WAV sample width {sw}; expected 16-bit")
+            return
+        pcm = np.frombuffer(wf.readframes(nframes), dtype=np.int16)
+    if nch == 2:
+        pcm = pcm.reshape(-1, 2).mean(axis=1).astype(np.int16)
+    if rate != 8000:
+        pcm = resample_poly(pcm, up=8000, down=rate).astype(np.int16)
+    raw = pcm.tobytes()
+    frame_bytes = 320  # 160 samples × 16-bit @ 8 kHz ≈ 20 ms
+    for i in range(0, len(raw), frame_bytes):
+        chunk = raw[i : i + frame_bytes]
+        if len(chunk) < frame_bytes:
+            chunk = chunk + b"\x00" * (frame_bytes - len(chunk))
+        call.write_audio(chunk)
+        time.sleep(0.02)
+
+
+def _play_and_cleanup(call: VoIPCall, filepath: Optional[str]):
     """Play a WAV over the SIP call and then delete the file."""
     if filepath and os.path.exists(filepath):
         try:
-            call.play_audio(filepath)
+            stream_wav_to_voip_call(call, filepath)
         except Exception as e:
-            logger.warning(f"play_audio error: {e}")
+            logger.warning(f"stream wav error: {e}")
         finally:
             os.remove(filepath)
 
@@ -310,31 +351,50 @@ def handle_call(call, phone_number: str, session_id: str):
 
 # ── SIP Server ───────────────────────────────────────────────────────────────
 class AdvisorSIPClient:
+    """Thin wrapper around pyVoIP VoIPPhone (correct API for pyVoIP 1.6.x)."""
+
     def __init__(self):
-        logger.info(f"Initializing SIP client on {SIP_IP}:{SIP_PORT} as user '{SIP_USER}'")
-        self.sip = SIPClient(SIP_IP, SIP_PORT, SIP_USER, SIP_PASS)
+        logger.info(
+            f"Initializing VoIP phone: bind {SIP_BIND}:{SIP_PORT} → "
+            f"registrar {SIP_SERVER}:{SIP_PORT} as '{SIP_USER}'"
+        )
+        self.phone = VoIPPhone(
+            SIP_SERVER,
+            SIP_PORT,
+            SIP_USER,
+            SIP_PASS,
+            myIP=SIP_BIND,
+            callCallback=self._on_incoming_call,
+            sipPort=SIP_PORT,
+        )
 
-    def start(self):
-        logger.info("Listening for incoming calls (multi-threaded)...")
-        while True:
-            try:
-                call = self.sip.get_call()
-                if call:
-                    phone_number = call.request.headers.get('From', {}).get('number', 'UnknownPhone')
-                    session_id = str(uuid.uuid4())
-                    logger.info(f"Incoming call from {phone_number} → session {session_id}")
+    def _on_incoming_call(self, call: VoIPCall) -> None:
+        """pyVoIP delivers an incoming VoIPCall (RINGING) from a background Timer."""
+        try:
+            from_hdr = call.request.headers.get("From", {})
+            if isinstance(from_hdr, dict):
+                phone_number = from_hdr.get("number", "UnknownPhone")
+            else:
+                phone_number = "UnknownPhone"
+        except Exception:
+            phone_number = "UnknownPhone"
+        session_id = str(uuid.uuid4())
+        logger.info(f"Incoming call from {phone_number} → session {session_id}")
+        threading.Thread(
+            target=handle_call,
+            args=(call, phone_number, session_id),
+            daemon=True,
+        ).start()
 
-                    # Spawn a dedicated thread per call (non-blocking accept loop)
-                    t = threading.Thread(
-                        target=handle_call,
-                        args=(call, phone_number, session_id),
-                        daemon=True
-                    )
-                    t.start()
-            except Exception as e:
-                logger.error(f"SIP loop error: {e}")
-
-            time.sleep(0.1)   # Yield to other threads
+    def start(self) -> None:
+        logger.info("Listening for incoming calls (VoIPPhone + worker threads)...")
+        self.phone.start()
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            logger.info("Shutting down VoIP phone...")
+            self.phone.stop()
 
 
 # ── Entry Point ──────────────────────────────────────────────────────────────
