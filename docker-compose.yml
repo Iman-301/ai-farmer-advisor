@@ -21,10 +21,15 @@ services:
     ports:
       - "8001:8000"
     environment:
-      - WHISPER_MODEL=medium      # options: tiny | base | small | medium
-      - WHISPER_THREADS=8        # Ryzen 7 7840HS: 8 cores
+      # Local fine-tuned CTranslate2 model (host: ./models → container /models)
+      - WHISPER_MODEL_PATH=/models/asr/whisper-small-amharic-bdu-8khz-aug-ct2-fp16
+      # Fallback if the path is missing (e.g. fresh clone without weights)
+      - WHISPER_MODEL=small
+      - WHISPER_LANGUAGE=am
+      - WHISPER_THREADS=8
     volumes:
       - ./data:/data
+      - ./models:/models:ro
 
   logic_service:
     build: ./logic_service
@@ -70,7 +75,9 @@ services:
       - LOGIC_URL=http://logic_service:8000/ask
       - SAVE_RECORD_URL=http://logic_service:8000/save_call_record
       - TTS_URL=http://tts_service:8000/synthesize
-      - SIP_IP=0.0.0.0
+      # SIP_SERVER = registrar / PBX host (SIP_IP alone is often 0.0.0.0 bind and is not a valid peer)
+      - SIP_SERVER=${SIP_SERVER:-host.docker.internal}
+      - SIP_BIND=${SIP_BIND:-0.0.0.0}
       - SIP_PORT=5060
       - SIP_USER=${SIP_USER:-advisor}
       - SIP_PASS=${SIP_PASS:-changeme}
