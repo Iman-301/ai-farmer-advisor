@@ -2,15 +2,13 @@
 FROM python:3.10-slim
 WORKDIR /app
 
-# ── CPU-only torch (no CUDA packages downloaded) ──────────────────────────────
-# torch's CUDA packages (nvidia-cudnn, nvidia-cublas, etc.) are optional —
-# they're only needed if you call .cuda(). We never do on this hardware.
-# --no-deps skips their download entirely; we add torch's actual runtime deps manually.
+# ── CPU-only PyTorch (matches current transformers; avoids NumPy 2 / torch 2.2 mismatch) ──
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install torch==2.2.2 torchaudio==2.2.2 --no-deps && \
-    pip install filelock typing-extensions sympy networkx jinja2 fsspec
+    pip install --default-timeout=600 \
+    torch==2.5.1 torchaudio==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cpu
 
-# ── Everything else ───────────────────────────────────────────────────────────
+# ── Everything else (requirements.txt must not reinstall torch) ─────────────
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --default-timeout=300 -r requirements.txt

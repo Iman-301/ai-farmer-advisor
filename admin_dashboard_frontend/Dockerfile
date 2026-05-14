@@ -20,6 +20,9 @@ COPY --from=deps /app/node_modules ./node_modules
 # Copy all source files
 COPY . .
 
+# Next.js may omit `public/`; Docker COPY requires the path to exist in the builder image
+RUN mkdir -p public
+
 # Build the production bundle
 RUN npm run build
 
