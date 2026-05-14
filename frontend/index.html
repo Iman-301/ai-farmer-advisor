@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="description" content="Voice-to-Voice Farmer Advisor — Admin & Expert Dashboard"/>
+  <title>Farmer Advisor — Admin Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/style.css"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ═══════════════════════  LOGIN PAGE  ════════════════════════════════════ -->
+<div id="login-page">
+  <div class="login-wrap">
+    <div class="login-brand">
+      <div class="brand-icon">🌾</div>
+      <div class="brand-text">
+        <h1>Voice Farmer Advisor</h1>
+        <p>Admin &amp; Expert Portal — AAU Capstone</p>
+      </div>
+    </div>
+    <div class="login-card">
+      <h2>Welcome back</h2>
+      <p>Sign in to access the admin dashboard</p>
+      <form id="login-form">
+        <div class="field">
+          <label>Username</label>
+          <input id="lu" type="text" placeholder="admin" autocomplete="username"/>
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input id="lp" type="password" placeholder="••••••••" autocomplete="current-password"/>
+        </div>
+        <div class="login-error" id="lerr"></div>
+        <button type="submit" class="btn-login">Sign In</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════  MAIN APP  ══════════════════════════════════════ -->
+<div id="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sb-logo">
+      <div class="brand-icon">🌾</div>
+      <div class="brand-text">
+        <h1>Farmer Advisor</h1>
+        <p>Admin Portal</p>
+      </div>
+    </div>
+    <nav class="sb-nav">
+      <div class="nav-label">Overview</div>
+      <div class="nav-item active" id="nav-dashboard" onclick="nav('dashboard')">
+        <span class="ni">📊</span> Dashboard
+      </div>
+      <div class="nav-label">Farmers &amp; Calls</div>
+      <div class="nav-item" id="nav-farmers" onclick="nav('farmers')">
+        <span class="ni">👨‍🌾</span> Farmers
+      </div>
+      <div class="nav-item" id="nav-calls" onclick="nav('calls')">
+        <span class="ni">📞</span> Call Logs
+      </div>
+      <div class="nav-item" id="nav-escalations" onclick="nav('escalations')">
+        <span class="ni">🚨</span> Escalations
+        <span class="nav-badge" id="esc-badge" style="display:none">0</span>
+      </div>
+      <div class="nav-label">Content</div>
+      <div class="nav-item" id="nav-kb" onclick="nav('kb')">
+        <span class="ni">📚</span> Knowledge Base
+      </div>
+      <div class="nav-item" id="nav-market" onclick="nav('market')">
+        <span class="ni">💰</span> Market Prices
+      </div>
+      <div class="nav-item" id="nav-alerts" onclick="nav('alerts')">
+        <span class="ni">📡</span> Alerts &amp; Forecasts
+      </div>
+    </nav>
+    <div class="sb-footer">
+      <div class="sb-user">
+        <div class="user-av" id="uav">A</div>
+        <div>
+          <div class="user-av-name" id="uname">Admin</div>
+          <div class="user-av-role" id="urole">admin</div>
+        </div>
+      </div>
+      <button class="btn-logout" onclick="logout()">↩ Sign Out</button>
+    </div>
+  </aside>
+
+  <!-- Content -->
+  <main class="main">
+    <div class="topbar">
+      <h1 id="pg-title">Dashboard</h1>
+      <div class="topbar-right">
+        <div class="system-dot" title="All services online"></div>
+        <span class="topbar-time" id="clock"></span>
+      </div>
+    </div>
+
+    <div class="page-body">
+
+      <!-- Dashboard -->
+      <div class="page active" id="page-dashboard">
+        <div class="stats-grid">
+          <div class="stat-card sc-green">
+            <div class="stat-ico">👨‍🌾</div>
+            <div class="stat-val" id="s-farmers">—</div>
+            <div class="stat-lbl">Registered Farmers</div>
+          </div>
+          <div class="stat-card sc-blue">
+            <div class="stat-ico">📞</div>
+            <div class="stat-val" id="s-calls">—</div>
+            <div class="stat-lbl">Calls Today</div>
+          </div>
+          <div class="stat-card sc-red">
+            <div class="stat-ico">🚨</div>
+            <div class="stat-val" id="s-esc">—</div>
+            <div class="stat-lbl">Pending Escalations</div>
+          </div>
+          <div class="stat-card sc-gold">
+            <div class="stat-ico">📡</div>
+            <div class="stat-val" id="s-alerts">—</div>
+            <div class="stat-lbl">Total Alerts</div>
+          </div>
+          <div class="stat-card sc-purple">
+            <div class="stat-ico">📚</div>
+            <div class="stat-val" id="s-kb">—</div>
+            <div class="stat-lbl">KB Entries</div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-hdr"><span class="card-title">📈 Calls — Last 7 Days</span></div>
+            <div class="chart-box"><canvas id="chart-calls"></canvas></div>
+          </div>
+          <div class="card">
+            <div class="card-hdr"><span class="card-title">🚨 Escalation Status</span></div>
+            <div class="chart-box"><canvas id="chart-esc"></canvas></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Farmers -->
+      <div class="page" id="page-farmers">
+        <div class="card">
+          <div class="card-hdr">
+            <span class="card-title">👨‍🌾 All Registered Farmers</span>
+            <span id="farmers-count" style="font-size:12px;color:var(--t3)"></span>
+          </div>
+          <div class="toolbar">
+            <input class="inp inp-search" id="farmer-search" placeholder="🔍  Search name, phone, location…" oninput="filterFarmers()"/>
+          </div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>#</th><th>Phone</th><th>Name</th><th>Location</th><th>Language</th><th>Registered</th></tr></thead>
+              <tbody id="farmers-body"><tr class="loading-row"><td colspan="6">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Call Logs -->
+      <div class="page" id="page-calls">
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">📞 Call Records (last 100)</span></div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>Session</th><th>Phone</th><th>Farmer</th><th>Duration</th><th>Timestamp</th><th>Recording</th></tr></thead>
+              <tbody id="calls-body"><tr class="loading-row"><td colspan="6">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Escalations -->
+      <div class="page" id="page-escalations">
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">🚨 Expert Escalation Queue</span></div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>ID</th><th>Farmer Query</th><th>Context</th><th>Status</th><th>Time</th><th>Action</th></tr></thead>
+              <tbody id="esc-body"><tr class="loading-row"><td colspan="6">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Knowledge Base -->
+      <div class="page" id="page-kb">
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">📚 Add Knowledge Base Entry</span></div>
+          <form id="kb-form" onsubmit="addKB(event)">
+            <div class="form-row">
+              <div class="field-wrap">
+                <label>Intent Tag</label>
+                <input class="inp" id="kb-intent" placeholder="e.g. crop_disease" required/>
+              </div>
+            </div>
+            <div style="margin-bottom:14px">
+              <label class="field-label">Amharic Response Text</label>
+              <textarea class="inp" id="kb-response" placeholder="Enter the Amharic response…" required></textarea>
+            </div>
+            <button type="submit" class="btn btn-green">➕ Add Entry</button>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-hdr">
+            <span class="card-title">📖 Entries (<span id="kb-count">0</span>)</span>
+          </div>
+          <div class="toolbar">
+            <input class="inp inp-search" id="kb-search" placeholder="🔍  Search intent or response…" oninput="filterKB()"/>
+          </div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>Intent</th><th>Response (preview)</th><th>ID</th><th>Action</th></tr></thead>
+              <tbody id="kb-body"><tr class="loading-row"><td colspan="4">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Market Prices -->
+      <div class="page" id="page-market">
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">💰 Add / Update Price</span></div>
+          <form id="market-form" onsubmit="addPrice(event)">
+            <div class="form-row">
+              <div class="field-wrap"><label>Crop Name</label><input class="inp" id="mp-crop" placeholder="e.g. Teff" required/></div>
+              <div class="field-wrap"><label>Region</label><input class="inp" id="mp-region" placeholder="e.g. Addis Ababa" required/></div>
+              <div class="field-wrap"><label>Price (ETB)</label><input class="inp" id="mp-price" type="number" step="0.01" min="0" placeholder="0.00" required/></div>
+              <div class="field-wrap"><label>Unit</label><input class="inp" id="mp-unit" placeholder="e.g. Kg, Quintal" required/></div>
+            </div>
+            <button type="submit" class="btn btn-green">➕ Add Price</button>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">📋 All Prices</span></div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>Crop</th><th>Region</th><th>Price (ETB)</th><th>Unit</th><th>Updated</th></tr></thead>
+              <tbody id="market-body"><tr class="loading-row"><td colspan="5">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Alerts -->
+      <div class="page" id="page-alerts">
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-hdr"><span class="card-title">📢 Broadcast New Alert</span></div>
+            <form id="alert-form" onsubmit="addAlert(event)">
+              <div class="form-row">
+                <div class="field-wrap">
+                  <label for="al-region">Target Region</label>
+                  <select class="inp" id="al-region">
+                    <option value="all">🌍 All Regions</option>
+                    <option value="Addis Ababa">Addis Ababa</option>
+                    <option value="Oromia">Oromia</option>
+                    <option value="Amhara">Amhara</option>
+                    <option value="SNNPR">SNNPR</option>
+                    <option value="Tigray">Tigray</option>
+                    <option value="Sidama">Sidama</option>
+                    <option value="Afar">Afar</option>
+                    <option value="Somali">Somali</option>
+                  </select>
+                </div>
+                <div class="field-wrap">
+                  <label for="al-sev">Severity</label>
+                  <select class="inp" id="al-sev">
+                    <option value="info">ℹ️  Info</option>
+                    <option value="warning" selected>⚠️  Warning</option>
+                    <option value="critical">🔴 Critical</option>
+                  </select>
+                </div>
+              </div>
+              <div style="margin-bottom:14px">
+                <label class="field-label">Alert Message (Amharic)</label>
+                <textarea class="inp" id="al-msg" placeholder="ማሳሰቢያ…" required></textarea>
+              </div>
+              <button type="submit" class="btn btn-green">📣 Broadcast</button>
+            </form>
+          </div>
+          <div class="card">
+            <div class="card-hdr"><span class="card-title">📊 Alerts by Region</span></div>
+            <div class="chart-box"><canvas id="chart-alerts"></canvas></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-hdr"><span class="card-title">📋 Recent Broadcasts</span></div>
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>Region</th><th>Message</th><th>Severity</th><th>Broadcast At</th></tr></thead>
+              <tbody id="alerts-body"><tr class="loading-row"><td colspan="4">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /page-body -->
+  </main>
+</div><!-- /app -->
+
+<!-- Audio modal -->
+<div class="modal-overlay" id="audio-modal">
+  <div class="modal-box">
+    <h3>🎙 Call Recording</h3>
+    <audio id="modal-audio" controls src=""></audio>
+    <br/>
+    <button class="btn-close" onclick="closeAudio()">Close</button>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toasts"></div>
+
+<!-- ── JS: load in dependency order ───────────────────────────────────────── -->
+<script src="js/state.js"></script>
+<script src="js/api.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/router.js"></script>
+<script src="js/pages/dashboard.js"></script>
+<script src="js/pages/farmers.js"></script>
+<script src="js/pages/calls.js"></script>
+<script src="js/pages/escalations.js"></script>
+<script src="js/pages/kb.js"></script>
+<script src="js/pages/market.js"></script>
+<script src="js/pages/alerts.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

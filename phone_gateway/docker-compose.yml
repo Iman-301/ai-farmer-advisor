@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: phone_gateway_postgres
+    environment:
+      POSTGRES_DB: phone_gateway_db
+      POSTGRES_USER: phone_user
+      POSTGRES_PASSWORD: phone_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  phone-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: phone_gateway_backend
+    depends_on:
+      - postgres
+      - vad-service
+    environment:
+      DATABASE_URL: postgresql://phone_user:phone_pass@postgres:5432/phone_gateway_db
+      RECORDINGS_DIR: /app/recordings
+      VAD_WS_BASE_URL: ws://vad-service:8010/ws/vad
+    ports:
+      - "8000:8000"
+    volumes:
+      - call_recordings:/app/recordings
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: phone_gateway_pgadmin
+    depends_on:
+      - postgres
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+  vad-service:
+    build:
+      context: ../vad_service
+      dockerfile: Dockerfile
+    container_name: vad_service
+    ports:
+      - "8010:8010"
+    volumes:
+      - ../vad_service/utterances:/app/utterances
+
+volumes:
+  postgres_data:
+  call_recordings:
+  pgadmin_data:

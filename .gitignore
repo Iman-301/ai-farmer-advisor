@@ -1,0 +1,23 @@
+srs_text.txt
+extract_pdf.py
+Compiled SRS.pdf
+srs_microservice_audit.md.resolved
+setup_dev.ps1
+start_dev.ps1
+dev_requirements.txt
+
+# Dev environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.wav
+data/
+
+# Large / local artifacts (do not push — use ingest, Docker volumes, or separate asset storage)
+models/
+phone_gateway/recordings/
+.kiro/
+logic_service/diagnostic_pdf_text/
+logic_service/diagnostic_results.json
+kb_documents/**/*.pdf

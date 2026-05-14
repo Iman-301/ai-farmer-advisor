@@ -1,0 +1,44 @@
+services:
+  # RAG-only stack: no TTS/STT/telephony/admin frontend.
+  # Usage:
+  #   docker compose -f docker-compose.yml -f docker-compose.rag.yml up -d
+  #   docker compose -f docker-compose.yml -f docker-compose.rag.yml exec logic_service python scripts/ingest_kb_folder.py
+  #   open http://localhost:8002/docs  (POST /ask)
+  # Keep Postgres + logic_service enabled by default.
+  # Do NOT override postgres config here; leaving it out keeps the full mapping
+  # from `docker-compose.yml` (image, env, healthcheck, volume).
+
+  logic_service:
+    # Override base depends_on (which includes STT/TTS) to RAG-only.
+    # Using list form here replaces the mapping from the base file.
+    depends_on:
+      - postgres
+    # RAG testing is text-in/text-out; these are not used and can be unset
+    environment:
+      - TTS_URL=
+      - STT_URL=
+      # Keep the same volume-backed cache/data as the base compose for fast restarts.
+      - DATA_DIR=/data
+      - HF_HOME=/data/hf_cache
+      - SENTENCE_TRANSFORMERS_HOME=/data/hf_cache
+      - TRANSFORMERS_CACHE=/data/hf_cache
+
+  # Disable STT/TTS entirely unless profile "full" is enabled.
+  # Even with depends_on overridden, some Compose versions still validate the base graph.
+  # Provide lightweight placeholders to avoid building large ML images.
+  stt_service:
+    image: alpine:3.20
+    command: ["sh", "-c", "sleep infinity"]
+    build: null
+
+  tts_service:
+    image: alpine:3.20
+    command: ["sh", "-c", "sleep infinity"]
+    build: null
+
+  # Disable everything else unless profile "full" is explicitly enabled.
+  telephony_service:
+    profiles: ["full"]
+  admin_dashboard_frontend:
+    profiles: ["full"]
+

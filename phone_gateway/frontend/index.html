@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>Voice Call</title>
+
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="caller-body">
+  <div class="iphone">
+
+    <div class="speaker"></div>
+
+    <div class="phone-screen">
+
+      <div id="callerForm" class="caller-form">
+        <h2>Caller Registration</h2>
+        <p class="small-text">Enter your details once to continue</p>
+
+        <input id="fullName" type="text" placeholder="Full name" />
+        <input id="phoneNumber" type="tel" placeholder="Phone number" />
+
+        <button class="continue-btn" onclick="registerCaller()">Continue</button>
+      </div>
+
+      <div id="dialer" class="hidden dialer-view">
+
+        <div class="top-area">
+          <div id="callerInfo" class="caller-info"></div>
+          <div id="status" class="status">Idle</div>
+          <div id="timer" class="timer">00:00</div>
+
+          <input
+            id="numberDisplay"
+            class="number-display"
+            type="text"
+            readonly
+            placeholder="Enter number"
+          />
+        </div>
+
+        <div class="keypad">
+          <button onclick="pressKey('1')"><span>1</span><small></small></button>
+          <button onclick="pressKey('2')"><span>2</span><small>ABC</small></button>
+          <button onclick="pressKey('3')"><span>3</span><small>DEF</small></button>
+
+          <button onclick="pressKey('4')"><span>4</span><small>GHI</small></button>
+          <button onclick="pressKey('5')"><span>5</span><small>JKL</small></button>
+          <button onclick="pressKey('6')"><span>6</span><small>MNO</small></button>
+
+          <button onclick="pressKey('7')"><span>7</span><small>PQRS</small></button>
+          <button onclick="pressKey('8')"><span>8</span><small>TUV</small></button>
+          <button onclick="pressKey('9')"><span>9</span><small>WXYZ</small></button>
+
+          <button onclick="pressKey('*')"><span>*</span><small></small></button>
+          <button onclick="pressKey('0')"><span>0</span><small>+</small></button>
+          <button onclick="pressKey('#')"><span>#</span><small></small></button>
+        </div>
+
+        <div class="call-row">
+          <button class="delete-btn" onclick="deleteKey()">⌫</button>
+
+          <button class="call-btn" onclick="startCall()">
+            <span class="phone-icon">☎</span>
+          </button>
+
+          <button class="end-btn" onclick="endCall()">
+            <span class="phone-icon">✕</span>
+          </button>
+        </div>
+
+        <button class="change-user" onclick="clearCaller()">
+          Change caller ID
+        </button>
+
+        <div id="sessionInfo" class="session-info"></div>
+
+      </div>
+    </div>
+
+    <div class="home-bar"></div>
+
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>Farmer to Farmer Voice Advisory</title>
+
+  <link rel="stylesheet" href="/static/monitor.css" />
+</head>
+<body>
+  <div class="dashboard">
+
+    <header class="header">
+      <div>
+        <h1>Farmer to Farmer Voice Advisory</h1>
+        <p>Live backend view of phone gateway, audio stream, and Silero VAD</p>
+      </div>
+
+      <div id="systemStatus" class="status-badge offline">
+        No Active Call
+      </div>
+    </header>
+
+    <section class="main-grid">
+
+      <div class="card active-call-card">
+        <div class="card-title">
+          <h2>Active Call</h2>
+          <span id="lastUpdated">—</span>
+        </div>
+
+        <div class="call-center-visual">
+
+          <div id="callStateText" class="call-state-text">
+            Waiting for incoming browser call
+          </div>
+
+          <div class="waveform-panel">
+            <div class="waveform-title">
+              <span>Live Voice Waveform</span>
+              <strong id="audioLevelValue">0%</strong>
+            </div>
+
+            <div id="waveform" class="waveform">
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+              <div class="wave-bar"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="info-grid">
+          <div>
+            <small>Session ID</small>
+            <strong id="sessionId">—</strong>
+          </div>
+
+          <div>
+            <small>Caller Name</small>
+            <strong id="callerName">—</strong>
+          </div>
+
+          <div>
+            <small>Caller Phone</small>
+            <strong id="callerPhone">—</strong>
+          </div>
+
+          <div>
+            <small>Call Status</small>
+            <strong id="callStatus">—</strong>
+          </div>
+
+          <div>
+            <small>Audio Format</small>
+            <strong id="audioFormat">—</strong>
+          </div>
+
+          <div>
+            <small>Sample Rate</small>
+            <strong id="sampleRate">—</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="card pipeline-card">
+        <h2>Live Pipeline</h2>
+
+        <div class="pipeline">
+          <div id="stepGateway" class="step">
+            <div class="step-icon">1</div>
+            <div>
+              <strong>Phone Gateway</strong>
+              <span>Waiting</span>
+            </div>
+          </div>
+
+          <div id="stepAudio" class="step">
+            <div class="step-icon">2</div>
+            <div>
+              <strong>Audio Stream</strong>
+              <span>No audio</span>
+            </div>
+          </div>
+
+          <div id="stepVad" class="step">
+            <div class="step-icon">3</div>
+            <div>
+              <strong>Silero VAD</strong>
+              <span>Waiting</span>
+            </div>
+          </div>
+
+          <div id="stepUtterance" class="step">
+            <div class="step-icon">4</div>
+            <div>
+              <strong>Utterance Saved</strong>
+              <span>None</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card metrics-card">
+        <h2>Audio Metrics</h2>
+
+        <div class="metrics">
+          <div>
+            <small>Chunks Received</small>
+            <strong id="audioChunks">0</strong>
+          </div>
+
+          <div>
+            <small>Audio Bytes</small>
+            <strong id="audioBytes">0 KB</strong>
+          </div>
+
+          <div>
+            <small>VAD Status</small>
+            <strong id="vadStatus">Waiting</strong>
+          </div>
+
+          <div>
+            <small>Utterances</small>
+            <strong id="utteranceCount">0</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="card utterance-card">
+        <h2>Detected Speech Segments</h2>
+
+        <div id="utteranceList" class="utterance-list">
+          <div class="empty">No utterance detected yet.</div>
+        </div>
+      </div>
+
+      <div class="card event-card">
+        <div class="card-title">
+          <h2>Backend Event Log</h2>
+          <button onclick="loadMonitor()">Refresh</button>
+        </div>
+
+        <div id="eventLog" class="event-log">
+          <div class="empty">No backend events yet.</div>
+        </div>
+      </div>
+
+      <div class="card recent-card">
+        <h2>Recent Calls</h2>
+
+        <div id="recentCalls" class="recent-calls">
+          <div class="empty">No completed calls yet.</div>
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <script src="/static/monitor.js"></script>
+</body>
+</html>

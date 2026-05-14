@@ -1,0 +1,19 @@
+fastapi
+uvicorn
+psycopg[binary]>=3.1
+numpy<2
+python-multipart
+chromadb
+sentence-transformers
+huggingface-hub>=0.23.0
+transformers<4.49.0          # 4.49+ has a NameError: 'nn' not defined bug at import time
+langchain
+langchain-community
+# llama-cpp-python              # requires VS C++ on Windows; install manually if needed
+requests
+bcrypt
+pdfminer.six
+PyMuPDF>=1.23.0
+python-docx
+pytest
+# torch is installed CPU-only in the Dockerfile via --no-deps

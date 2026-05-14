@@ -1,0 +1,22 @@
+# Dependencies (installed fresh inside Docker)
+node_modules
+
+# Build output (generated inside Docker)
+.next
+out
+
+# Git / editor artefacts
+.git
+.gitignore
+.DS_Store
+*.md
+*.log
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# CI / test artefacts
+coverage
+.nyc_output

@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pydantic
+gTTS
+transformers>=4.41,<5
+# torch / torchaudio are installed in Dockerfile (CPU index) — do not list here
+soundfile
+librosa
+uroman
+sentencepiece
+numpy>=1.26,<3

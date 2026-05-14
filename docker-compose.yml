@@ -1,0 +1,110 @@
+services:
+  # ── Postgres + pgvector (KB documents & chunk embeddings, SRS FR08/FR10) ──
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: kb
+      POSTGRES_PASSWORD: kb
+      POSTGRES_DB: advisor_kb
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_kb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kb -d advisor_kb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  stt_service:
+    build: ./stt_service
+    ports:
+      - "8001:8000"
+    environment:
+      - WHISPER_MODEL=medium      # options: tiny | base | small | medium
+      - WHISPER_THREADS=8        # Ryzen 7 7840HS: 8 cores
+    volumes:
+      - ./data:/data
+
+  logic_service:
+    build: ./logic_service
+    ports:
+      - "8002:8000"
+    environment:
+      - TTS_URL=http://tts_service:8000/synthesize
+      - STT_URL=http://stt_service:8000/transcribe
+      - DATA_DIR=/data
+      - RAG_DISTANCE_THRESHOLD=1.2
+      # KB in Postgres (set to enable; retrieval falls back to Chroma if empty / unset)
+      - POSTGRES_URL=postgresql://kb:kb@postgres:5432/advisor_kb
+      - RAG_PG_MAX_L2_DISTANCE=1.35
+      - HF_HOME=/data/hf_cache              # cache HuggingFace models to volume
+      - SENTENCE_TRANSFORMERS_HOME=/data/hf_cache
+      - TRANSFORMERS_CACHE=/data/hf_cache
+      - HF_HUB_DISABLE_PROGRESS_BARS=1
+    volumes:
+      - ./logic_service:/app
+      - ./data:/data
+      - ./kb_documents:/app/kb_documents:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      stt_service:
+        condition: service_started
+      tts_service:
+        condition: service_started
+
+  tts_service:
+    build: ./tts_service
+    ports:
+      - "8003:8000"
+    volumes:
+      - ./data:/data
+
+  # admin_dashboard (old Streamlit UI) removed — replaced by frontend (nginx)
+
+  telephony_service:
+    build: ./telephony_service
+    environment:
+      - STT_URL=http://stt_service:8000/transcribe
+      - LOGIC_URL=http://logic_service:8000/ask
+      - SAVE_RECORD_URL=http://logic_service:8000/save_call_record
+      - TTS_URL=http://tts_service:8000/synthesize
+      # SIP_SERVER = registrar / PBX host (SIP_IP alone is often 0.0.0.0 bind and is not a valid peer)
+      - SIP_SERVER=${SIP_SERVER:-host.docker.internal}
+      - SIP_BIND=${SIP_BIND:-0.0.0.0}
+      - SIP_PORT=5060
+      - SIP_USER=${SIP_USER:-advisor}
+      - SIP_PASS=${SIP_PASS:-changeme}
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+    volumes:
+      - ./telephony_service:/app
+      - ./data:/data
+    depends_on:
+      - stt_service
+      - logic_service
+      - tts_service
+
+  # ── Admin Dashboard Frontend (Next.js) ───────────────────────────────────
+  admin_dashboard_frontend:
+    build: ./admin_dashboard_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+      # Server-side proxy URL — NOT exposed to browser (no NEXT_PUBLIC_ prefix)
+      - LOGIC_SERVICE_URL=http://logic_service:8000
+      # Path for the /api/audio streaming route
+      - DATA_DIR=/data
+    volumes:
+      - ./data:/data:ro   # read-only: frontend only streams recordings, never writes
+    depends_on:
+      - logic_service
+    restart: unless-stopped
+
+volumes:
+  pg_kb_data:
+

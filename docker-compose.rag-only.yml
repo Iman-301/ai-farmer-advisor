@@ -1,0 +1,55 @@
+services:
+  # RAG-only stack: Postgres (pgvector) + logic_service only.
+  # No STT/TTS/telephony/admin services exist in this compose file.
+  #
+  # Usage:
+  #   docker compose -f docker-compose.rag-only.yml up -d --build
+  #   docker compose -f docker-compose.rag-only.yml exec logic_service python scripts/ingest_kb_folder.py
+  #   open http://127.0.0.1:8002/docs
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: kb
+      POSTGRES_PASSWORD: kb
+      POSTGRES_DB: advisor_kb
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_kb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kb -d advisor_kb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  logic_service:
+    build: ./logic_service
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "8002:8000"
+    environment:
+      # RAG is text-in/text-out; these downstream services are not used here.
+      - TTS_URL=
+      - STT_URL=
+      - DATA_DIR=/data
+      - RAG_DISTANCE_THRESHOLD=1.2
+      # KB in Postgres (enabled)
+      - POSTGRES_URL=postgresql://kb:kb@postgres:5432/advisor_kb
+      - RAG_PG_MAX_L2_DISTANCE=1.35
+      # Cache HuggingFace/SentenceTransformers downloads on the shared volume
+      - HF_HOME=/data/hf_cache
+      - SENTENCE_TRANSFORMERS_HOME=/data/hf_cache
+      - TRANSFORMERS_CACHE=/data/hf_cache
+      - HF_HUB_DISABLE_PROGRESS_BARS=1
+    volumes:
+      - ./logic_service:/app
+      - ./data:/data
+      - ./kb_documents:/app/kb_documents:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pg_kb_data:
+

@@ -1,0 +1,5 @@
+FROM python:3.10-slim
+
+RUN pip install --upgrade pip setuptools wheel
+COPY requirements-common.txt /tmp/requirements-common.txt
+RUN pip install --default-timeout=1000 --retries 10 --no-cache-dir -r /tmp/requirements-common.txt
