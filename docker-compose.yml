@@ -47,6 +47,15 @@ services:
       - SENTENCE_TRANSFORMERS_HOME=/data/hf_cache
       - TRANSFORMERS_CACHE=/data/hf_cache
       - HF_HUB_DISABLE_PROGRESS_BARS=1
+      # LLM generation on top of RAG context (configure in .env)
+      # Using Groq free tier (OpenAI-compatible): https://console.groq.com
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.groq.com/openai/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-llama-3.3-70b-versatile}
+      # Gemini (kept for optional re-enable)
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-lite}
     volumes:
       - ./logic_service:/app
       - ./data:/data
