@@ -59,19 +59,38 @@ CROP_KEYWORDS: dict[str, str] = {
     "ቅቤ": "Butter",
     "ቡና": "Coffee",
     "coffee": "Coffee",
+    "ሽንኩርት": "Onion",
+    "onion": "Onion",
+    "ሙዝ": "Banana",
+    "banana": "Banana",
+    "ቲማቲም": "Tomato",
+    "tomato": "Tomato",
+    "ሀበሻ": "Cabbage",
+    "cabbage": "Cabbage",
+    "ካቮች": "Pepper",
+    "pepper": "Pepper",
+    "ሙንግ": "Mung bean",
+    "mung": "Mung bean",
+    "ሀብት": "Haricot bean",
+    "አተር": "Haricot bean",
 }
 
 CROP_ENTITY_WORDS = set(CROP_KEYWORDS.keys())
 
-MARKET_KEYWORDS = [
+# Strong market signals only — bare "ስንት" matches "ከስንት ሰዓት" (how many hours) and
+# wrongly routes extension/KB questions to the crop-price dialog.
+MARKET_KEYWORDS_STRONG = [
     "ዋጋ",
-    "ስንት ነው",
-    "ስንት",
     "ገበያ",
     "price",
     "market",
     "cost",
     "ብር",
+]
+MARKET_KEYWORDS_PHRASE = [
+    "ስንት ነው",
+    "ዋጋ ስንት",
+    "ብር ስንት",
 ]
 
 AGRI_INTENT_KEYWORDS = [
@@ -163,6 +182,10 @@ _TOPIC_RULES: list[tuple[str, list[str]]] = [
             "ፀረ",
             "ተባይ",
             "በሽታ",
+            "አፈድ",
+            "aphid",
+            "ሩሲያ",
+            "russian wheat",
             "wheat value chain",
             "pvmp",
         ],
@@ -211,6 +234,12 @@ _TOPIC_RULES: list[tuple[str, list[str]]] = [
             "planting",
             "መዝራት",
             "cultivar",
+            "እፅዋት",
+            "ዝርያ",
+            "አፋር",
+            "ሶማሌ",
+            "plant guide",
+            "አገር ውስጥ",
         ],
     ),
 ]
@@ -298,6 +327,71 @@ class NLUResult:
         }
 
 
+def is_market_price_query(text: str) -> bool:
+    """True only when the farmer is asking about crop/market price, not 'how many hours'."""
+    stripped = normalize_ethiopic_input((text or "").strip())
+    if not stripped:
+        return False
+    if any(_keyword_matches_text(stripped, k) for k in MARKET_KEYWORDS_STRONG):
+        return True
+    if any(_keyword_matches_text(stripped, k) for k in MARKET_KEYWORDS_PHRASE):
+        return True
+    # "ስንት" alone is ambiguous; require an explicit price/market cue in the same question.
+    if _keyword_matches_text(stripped, "ስንት"):
+        price_cues = ("ዋጋ", "ገበያ", "ብር", "price", "market", "cost")
+        return any(c in stripped for c in price_cues) or any(
+            _keyword_matches_text(stripped, c) for c in price_cues
+        )
+    return False
+
+
+def is_crop_slot_reply(text: str) -> bool:
+    """Short reply that looks like a crop name (slot fill), not a new KB question."""
+    stripped = normalize_ethiopic_input((text or "").strip())
+    if not stripped:
+        return False
+    if _extract_crop_entities(stripped).get("crop_en"):
+        return True
+    toks = _tokens(stripped)
+    if len(toks) <= 3 and len(stripped) <= 40:
+        return any(t in CROP_ENTITY_WORDS for t in toks)
+    return False
+
+
+def _is_plant_guide_query(text: str) -> bool:
+    """Lowland/native plant guide (012) — do not bias retrieval toward extension manual 001."""
+    stripped = normalize_ethiopic_input((text or "").strip())
+    if not stripped:
+        return False
+    region = any(
+        _keyword_matches_text(stripped, k)
+        for k in ("አፋር", "ሶማሌ", "ዝቅተኛ", "lowland")
+    )
+    plant = any(
+        _keyword_matches_text(stripped, k)
+        for k in ("እፅዋት", "ዝርያ", "አገር ውስጥ", "plant guide")
+    )
+    asks_guide = any(
+        p in stripped
+        for p in (
+            "ይረዳል",
+            "ምን ይረዳ",
+            "ምን ይጠቅም",
+            "ምን ይፈቀድ",
+            "ምን ነው",
+            "what does",
+        )
+    ) or "መመሪያ" in stripped
+    return region and plant and asks_guide
+
+
+def has_crop_in_query(text: str, nlu: Optional["NLUResult"] = None) -> bool:
+    """True when the question already names a crop (skip 'which crop?' slot prompt)."""
+    if nlu and nlu.entities.get("crop_en"):
+        return True
+    return bool(_extract_crop_entities(text).get("crop_en"))
+
+
 def _extract_crop_entities(text: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for kw, crop_en in CROP_KEYWORDS.items():
@@ -320,7 +414,7 @@ def analyze_intent(text: str) -> NLUResult:
     entities = _extract_crop_entities(stripped)
 
     # Market price (separate data path in main)
-    if any(_keyword_matches_text(stripped, k) for k in MARKET_KEYWORDS):
+    if is_market_price_query(stripped):
         conf = 0.88 if entities.get("crop_en") else 0.72
         return NLUResult("market_price", conf, entities, stripped)
 
@@ -348,9 +442,35 @@ def analyze_intent(text: str) -> NLUResult:
     else:
         conf = min(0.93, 0.38 + 0.11 * best_score)
 
+    # Wheat aphid / RWA symptom questions → pest doc 014 (not generic unknown).
+    has_aphid = any(
+        _keyword_matches_text(stripped, k) for k in ("አፈድ", "aphid", "rwa", "russian")
+    )
+    has_wheat = any(_keyword_matches_text(stripped, k) for k in ("ስንዴ", "wheat"))
+    if has_aphid and has_wheat:
+        best_intent = "pest_disease"
+        conf = max(conf, 0.55)
+
+    # Plant guide (Afar/Somali lowlands): keep raw query — extension_advisory hint pulls wrong PDF.
+    if _is_plant_guide_query(stripped):
+        best_intent = "crop_production"
+        conf = max(conf, 0.58)
+        retrieval = stripped
+        return NLUResult(
+            primary_intent=best_intent,
+            confidence=conf,
+            entities=entities,
+            retrieval_query=retrieval,
+        )
+
     # For "unknown" we do NOT append topic hints; it can bias retrieval
     # away from the user's exact wording (e.g. manuals / extension materials).
     if best_intent == "unknown":
+        retrieval = stripped
+    elif best_intent == "extension_advisory" and any(
+        p in stripped for p in ("ይረዳል", "ምን ይረዳ", "ምን ይጠቅም")
+    ):
+        # "What does this guide help with?" — user wording is enough for embedding search.
         retrieval = stripped
     else:
         hint = _RETRIEVAL_HINTS.get(best_intent, _RETRIEVAL_HINTS["general_agronomy"])
@@ -389,8 +509,6 @@ def needs_slot_filling(text: str, session_state: Optional[dict], nlu: NLUResult)
         return None
 
     has_agri = any(_keyword_matches_text(text, k) for k in AGRI_INTENT_KEYWORDS)
-    has_crop = any(_keyword_matches_text(text, k) for k in CROP_ENTITY_WORDS)
-
-    if has_agri and not has_crop:
+    if has_agri and not has_crop_in_query(text, nlu):
         return "ለምን ሰብል ነው ጥያቄዎ? (ስንዴ፣ ጤፍ፣ ቦሎቄ፣ ወዘተ.)"
     return None
