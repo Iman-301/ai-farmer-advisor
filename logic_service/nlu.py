@@ -194,10 +194,17 @@ _TOPIC_RULES: list[tuple[str, list[str]]] = [
         "land_characterization",
         [
             "landpks",
+            "ላንድፒኬኤስ",
+            "ላንድ ፒኬኤስ",
             "soil type",
             "classification",
             "የመሬት አይነት",
             "land potential",
+            "የአፈር ቀለም",
+            "soil color",
+            "አፕሊኬሽን",
+            "መተግበሪያ",
+            "የመሬት መለያ",
         ],
     ),
     (

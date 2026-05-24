@@ -53,9 +53,10 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.groq.com/openai/v1}
       - OPENAI_MODEL=${OPENAI_MODEL:-llama-3.3-70b-versatile}
-      # Gemini (kept for optional re-enable)
+      # Gemini fallback (used only when Groq returns 429 / error)
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-lite}
+      - LLM_GROQ_FALLBACK_GEMINI=${LLM_GROQ_FALLBACK_GEMINI:-1}
     volumes:
       - ./logic_service:/app
       - ./data:/data

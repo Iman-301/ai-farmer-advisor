@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 import os
 import re
 import logging
 import requests
 import base64
+import io
 import time
 from typing import Optional
 from database import (
@@ -119,6 +121,13 @@ GEMINI_MODEL_FALLBACKS = [
     if m.strip()
 ]
 LLM_CONTEXT_MAX_CHARS = int(os.environ.get("LLM_CONTEXT_MAX_CHARS", "2400"))
+# Re-tries Gemini once when Groq returns 429 / rate-limit / error. Off by default unless a
+# GEMINI_API_KEY is also configured. Set LLM_GROQ_FALLBACK_GEMINI=0 to disable.
+LLM_GROQ_FALLBACK_GEMINI = (os.environ.get("LLM_GROQ_FALLBACK_GEMINI") or "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 # Default: one model, no retry — avoids burning free-tier quota (was up to 6 calls/request).
 GEMINI_RETRY_ON_QUOTA = (os.environ.get("GEMINI_RETRY_ON_QUOTA") or "0").strip().lower() in (
     "1",
@@ -296,6 +305,23 @@ INTRO_TOC_NOISE_MARKERS = (
 
 def _question_type(query_text: str) -> str:
     q = (query_text or "").lower()
+    q_raw = query_text or ""
+    # List-style questions (methods/symptoms/types/options) — keep all bullets verbatim
+    if any(
+        x in q_raw
+        for x in (
+            "ምን ዘዴዎች",
+            "ምን ምልክቶች",
+            "ምን አይነቶች",
+            "ምን ዓይነቶች",
+            "ምን ምን",
+            "የትኞቹ",
+            "ዘዴዎች አሉ",
+            "ምልክቶች ያሳያል",
+            "ምልክቶች አሉ",
+        )
+    ) or any(x in q for x in ("what methods", "what symptoms", "what types", "list ")):
+        return "list"
     if any(x in q for x in ("ለምን", "why", "ምክንያት", "አስፈላጊ")):
         return "why"
     if any(x in q for x in ("እንዴት", "how to", "ዘዴ", "ሴራ")):
@@ -454,6 +480,19 @@ def _llm_system_prompt(qtype: str = "general") -> str:
             "Reply in at most 4 short bullet points or 3 sentences.\n"
             "Do NOT include explanations of why, just the steps."
         )
+    if qtype == "list":
+        return (
+            base
+            + "TASK: The user asks for a LIST (methods, symptoms, types, options).\n"
+            "STEP 1 — Scan ALL context chunks for items matching the user's question.\n"
+            "STEP 2 — Output EVERY distinct item you find as a separate bullet.\n"
+            "STEP 3 — Keep each bullet short and concrete (1 line, no padding).\n"
+            "STRICT RULES:\n"
+            "  - Use bullet markers like '•' or '-' at the start of each line.\n"
+            "  - Do NOT drop items even if the answer becomes long.\n"
+            "  - Do NOT add 'as follows' or other intro text — go straight to bullets.\n"
+            "  - Do NOT invent items that are not in the context."
+        )
     if qtype == "objectives":
         return (
             base
@@ -498,7 +537,7 @@ def _call_gemini_model(model_name: str, prompt: str) -> Optional[str]:
         prompt,
         generation_config=genai.types.GenerationConfig(
             temperature=0.2,
-            max_output_tokens=420,
+            max_output_tokens=int(os.environ.get("LLM_MAX_TOKENS", "600")),
         ),
     )
     if getattr(resp, "candidates", None):
@@ -694,7 +733,7 @@ def generate_amharic_answer_llm(
                     model=OPENAI_MODEL,
                     messages=messages,
                     temperature=0.2,
-                    max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "420")),
+                    max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "600")),
                 )
                 out = (resp.choices[0].message.content or "").strip()
                 if out:
@@ -716,6 +755,48 @@ def generate_amharic_answer_llm(
                     exc,
                 )
                 print(f"[logic_service] LLM failed: {exc}", flush=True)
+
+                # ── Gemini fallback (only when Groq quota/error) ──────────
+                if LLM_GROQ_FALLBACK_GEMINI and GEMINI_API_KEY:
+                    logger.info(
+                        "Trying Gemini fallback after Groq failure (state=%s)",
+                        llm_last_status.get("state"),
+                    )
+                    print(
+                        f"[logic_service] Groq {llm_last_status.get('state')} — "
+                        f"trying Gemini fallback",
+                        flush=True,
+                    )
+                    prompt = f"{system_prompt}\n\n{user_prompt}"
+                    for model_name in _gemini_models_to_try()[:1]:
+                        try:
+                            out = _call_gemini_model(model_name, prompt)
+                            if out:
+                                llm_provider_active = f"gemini-fallback:{model_name}"
+                                _set_llm_status(
+                                    "ok", f"gemini-fallback:{model_name}"
+                                )
+                                print(
+                                    "[logic_service] Gemini fallback OK",
+                                    flush=True,
+                                )
+                                return out
+                        except Exception as gem_exc:
+                            if _is_gemini_quota_error(gem_exc):
+                                _set_llm_status(
+                                    "quota_exceeded",
+                                    f"groq+gemini: {str(gem_exc)[:200]}",
+                                )
+                            else:
+                                _set_llm_status(
+                                    "error",
+                                    f"gemini-fallback: {str(gem_exc)[:200]}",
+                                )
+                            logger.warning(
+                                "Gemini fallback failed model=%s: %s",
+                                model_name,
+                                gem_exc,
+                            )
 
     # Offline fallback: llama.cpp if present.
     if provider in ("llama_cpp", "llama", "gguf"):
@@ -1534,6 +1615,154 @@ async def save_call_record(
         register_farmer(phone_number, "Unknown Caller", "Unknown")
 
     return {"status": "success", "file_path": file_path}
+
+
+@app.post("/voice/ask")
+async def voice_ask(
+    audio_file: UploadFile = File(...),
+    phone_number: str = Form("Unknown"),
+    session_id: str = Form("default_session"),
+    return_audio: bool = Form(True),
+):
+    """
+    End-to-end voice pipeline (no telephony / no SIP).
+    Pipeline: audio upload -> STT -> /ask logic (NLU + RAG + LLM) -> TTS audio back.
+
+    Callers are expected to send a VAD-trimmed Amharic utterance (use the
+    existing `vad_service` WebSocket or any client-side VAD). We do not run
+    VAD again here.
+
+    Returns:
+      - If `return_audio=True` (default): audio/wav bytes with metadata in
+        response headers (X-Transcript-B64, X-Response-Text-B64, X-Intent, ...).
+        Amharic text in headers is UTF-8 base64 because HTTP headers must be ASCII.
+      - Else: JSON with transcript + response text + base64 audio.
+    """
+    audio_bytes_in = await audio_file.read()
+    if not audio_bytes_in:
+        raise HTTPException(status_code=400, detail="Empty audio upload")
+
+    try:
+        stt_resp = requests.post(
+            STT_URL,
+            files={
+                "audio_file": (
+                    audio_file.filename or "utt.wav",
+                    audio_bytes_in,
+                    audio_file.content_type or "audio/wav",
+                )
+            },
+            timeout=60,
+        )
+        stt_data = stt_resp.json()
+        transcript = (stt_data.get("text") or "").strip()
+        stt_conf = float(stt_data.get("confidence") or 0.0)
+    except Exception as exc:
+        logger.error("Voice /ask STT failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"STT failed: {exc}")
+
+    if not transcript:
+        reprompt = "ይቅርታ፣ ድምፅዎን ሰምቼ ለመረዳት አልቻልኩም። እባክዎ በአማርኛ ይድገሙ።"
+        return _voice_response_bundle(
+            audio_text=reprompt,
+            transcript="",
+            stt_conf=stt_conf,
+            response_text=reprompt,
+            intent="asr_failed",
+            references=[],
+            nlu_out={},
+            meta=_answer_meta("system"),
+            return_audio=return_audio,
+        )
+
+    response_text, intent, references, nlu_out, meta = generate_rag_response(
+        transcript, phone_number, session_id
+    )
+
+    return _voice_response_bundle(
+        audio_text=response_text,
+        transcript=transcript,
+        stt_conf=stt_conf,
+        response_text=response_text,
+        intent=intent,
+        references=references,
+        nlu_out=nlu_out,
+        meta=meta,
+        return_audio=return_audio,
+    )
+
+
+def _voice_response_bundle(
+    *,
+    audio_text: str,
+    transcript: str,
+    stt_conf: float,
+    response_text: str,
+    intent: str,
+    references: list,
+    nlu_out: dict,
+    meta: dict,
+    return_audio: bool,
+):
+    audio_out: bytes = b""
+    tts_error: Optional[str] = None
+    try:
+        tts_resp = requests.post(TTS_URL, json={"text": audio_text}, timeout=60)
+        if tts_resp.status_code == 200:
+            audio_out = tts_resp.content
+        else:
+            tts_error = f"TTS HTTP {tts_resp.status_code}"
+            logger.error(tts_error)
+    except Exception as exc:
+        tts_error = f"TTS exception: {exc}"
+        logger.error(tts_error)
+
+    if return_audio and audio_out:
+        def _hdr_ascii(s: str, max_len: int = 128) -> str:
+            return (s or "").replace("\n", " ").replace("\r", " ").strip()[:max_len]
+
+        def _hdr_utf8_b64(s: str) -> str:
+            text = (s or "").replace("\n", " ").replace("\r", " ").strip()
+            if not text:
+                return ""
+            return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+        headers = {
+            "X-Stt-Confidence": f"{stt_conf:.3f}",
+            "X-Intent": _hdr_ascii(intent),
+            "X-Answer-Source": _hdr_ascii(meta.get("answer_source", "")),
+            "X-Llm-Status": _hdr_ascii(meta.get("llm_status", "")),
+            "Content-Disposition": 'attachment; filename="response.wav"',
+            "Content-Length": str(len(audio_out)),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "no-store",
+        }
+        if transcript:
+            headers["X-Transcript-B64"] = _hdr_utf8_b64(transcript)
+        if response_text:
+            headers["X-Response-Text-B64"] = _hdr_utf8_b64(response_text)
+
+        return StreamingResponse(
+            io.BytesIO(audio_out),
+            media_type="audio/wav",
+            headers=headers,
+        )
+
+    payload: dict = {
+        "transcript": transcript,
+        "stt_confidence": stt_conf,
+        "response": response_text,
+        "intent": intent,
+        "nlu": nlu_out,
+        **meta,
+    }
+    if references:
+        payload["references"] = references
+    if audio_out:
+        payload["audio_base64"] = base64.b64encode(audio_out).decode("utf-8")
+    if tts_error:
+        payload["tts_error"] = tts_error
+    return payload
 
 
 @app.post("/simulate_call")
