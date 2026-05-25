@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Silero VAD Standalone Test</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0b0f14;
+      color: #e6edf3;
+      min-height: 100vh;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 22px;
+    }
+    .subtitle {
+      color: #8b949e;
+      font-size: 13px;
+      margin-bottom: 24px;
+    }
+    .row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      background: #238636;
+      color: white;
+    }
+    button:disabled {
+      background: #30363d;
+      color: #6e7681;
+      cursor: not-allowed;
+    }
+    button.stop {
+      background: #da3633;
+    }
+    .status-box {
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 8px 16px;
+      padding: 16px;
+      background: #161b22;
+      border-radius: 10px;
+      border: 1px solid #30363d;
+      margin-bottom: 20px;
+      font-size: 14px;
+    }
+    .label {
+      color: #8b949e;
+    }
+    .value {
+      color: #e6edf3;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    .speaking {
+      color: #3fb950;
+      font-weight: 700;
+    }
+    .silent {
+      color: #8b949e;
+    }
+    .meter {
+      width: 100%;
+      height: 28px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .meter-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #1f6feb, #3fb950);
+      width: 0%;
+      transition: width 80ms ease-out;
+    }
+    .events {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 12px;
+      max-height: 360px;
+      overflow-y: auto;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .event-line {
+      padding: 4px 0;
+      border-bottom: 1px solid #21262d;
+    }
+    .event-line:last-child {
+      border-bottom: none;
+    }
+    .e-speech_started { color: #3fb950; }
+    .e-speech_ended { color: #f0883e; }
+    .e-vad_ready { color: #58a6ff; }
+    .e-error { color: #f85149; }
+    .utterance-link {
+      color: #58a6ff;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>Silero VAD Standalone Test</h1>
+  <div class="subtitle">
+    Connects directly to <code>ws://localhost:8010/ws/vad</code> — no STT, no LLM, no TTS.
+    Just VAD events.
+  </div>
+
+  <div class="row">
+    <button id="startBtn" onclick="startVad()">Start mic</button>
+    <button id="stopBtn" class="stop" onclick="stopVad()" disabled>Stop</button>
+    <button onclick="clearEvents()">Clear events</button>
+  </div>
+
+  <div class="status-box">
+    <div class="label">Connection</div>
+    <div class="value" id="connStatus">Disconnected</div>
+
+    <div class="label">VAD state</div>
+    <div class="value" id="vadState"><span class="silent">idle</span></div>
+
+    <div class="label">Speech probability</div>
+    <div class="value" id="probValue">—</div>
+
+    <div class="label">Utterances saved</div>
+    <div class="value" id="utteranceCount">0</div>
+
+    <div class="label">Chunks sent</div>
+    <div class="value" id="chunkCount">0</div>
+  </div>
+
+  <div class="label" style="font-size:13px;margin-bottom:4px;">Mic level</div>
+  <div class="meter"><div class="meter-fill" id="meterFill"></div></div>
+
+  <h2 style="font-size:15px;margin-top:24px;">VAD events</h2>
+  <div class="events" id="events">
+    <div class="event-line silent">No events yet. Click "Start mic" and speak.</div>
+  </div>
+
+  <script>
+    const VAD_WS_URL = "ws://localhost:8010/ws/vad";
+    const TARGET_SAMPLE_RATE = 16000;
+
+    let ws = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let sourceNode = null;
+    let processorNode = null;
+    let chunkCount = 0;
+    let utteranceCount = 0;
+
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const connStatus = document.getElementById("connStatus");
+    const vadState = document.getElementById("vadState");
+    const probValue = document.getElementById("probValue");
+    const utteranceCountEl = document.getElementById("utteranceCount");
+    const chunkCountEl = document.getElementById("chunkCount");
+    const meterFill = document.getElementById("meterFill");
+    const eventsEl = document.getElementById("events");
+
+    function addEvent(name, data) {
+      const line = document.createElement("div");
+      line.className = `event-line e-${name}`;
+      const ts = new Date().toLocaleTimeString();
+      let extra = "";
+      if (data && data.utterance_path) {
+        extra = ` → ${data.utterance_path}`;
+      } else if (data && data.speech_probability !== undefined) {
+        extra = ` (p=${data.speech_probability})`;
+      }
+      if (data && data.duration_seconds !== undefined && data.duration_seconds !== null) {
+        extra += ` [${data.duration_seconds}s]`;
+      }
+      line.textContent = `[${ts}] ${name}${extra}`;
+      eventsEl.prepend(line);
+    }
+
+    function clearEvents() {
+      eventsEl.innerHTML = "";
+    }
+
+    async function startVad() {
+      try {
+        startBtn.disabled = true;
+
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+
+        const sessionId = "vad_test_" + Date.now();
+        const url = `${VAD_WS_URL}?session_id=${sessionId}&sample_rate=${TARGET_SAMPLE_RATE}`;
+        ws = new WebSocket(url);
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = () => {
+          connStatus.textContent = "Connected → " + sessionId;
+          stopBtn.disabled = false;
+          startPCMStreaming(mediaStream);
+        };
+
+        ws.onmessage = (event) => {
+          let data;
+          try {
+            data = JSON.parse(event.data);
+          } catch {
+            return;
+          }
+
+          const ev = data.event;
+          addEvent(ev, data);
+
+          if (data.speech_probability !== undefined) {
+            probValue.textContent = data.speech_probability;
+          }
+
+          if (ev === "speech_started") {
+            vadState.innerHTML = '<span class="speaking">SPEAKING</span>';
+          } else if (ev === "speech_ended") {
+            vadState.innerHTML = '<span class="silent">silent</span>';
+            utteranceCount++;
+            utteranceCountEl.textContent = utteranceCount;
+          } else if (ev === "vad_ready") {
+            vadState.innerHTML = '<span class="silent">ready</span>';
+          }
+        };
+
+        ws.onerror = () => {
+          addEvent("error", { message: "WebSocket error" });
+          connStatus.textContent = "Error";
+        };
+
+        ws.onclose = () => {
+          connStatus.textContent = "Disconnected";
+          stopBtn.disabled = true;
+          startBtn.disabled = false;
+        };
+      } catch (err) {
+        addEvent("error", { message: err.message });
+        startBtn.disabled = false;
+      }
+    }
+
+    function stopVad() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ event: "end_session" }));
+        } catch {}
+        setTimeout(() => ws && ws.close(), 200);
+      }
+      cleanupAudio();
+      vadState.innerHTML = '<span class="silent">idle</span>';
+    }
+
+    function cleanupAudio() {
+      if (processorNode) {
+        try { processorNode.disconnect(); } catch {}
+        processorNode = null;
+      }
+      if (sourceNode) {
+        try { sourceNode.disconnect(); } catch {}
+        sourceNode = null;
+      }
+      if (audioContext) {
+        try { audioContext.close(); } catch {}
+        audioContext = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop());
+        mediaStream = null;
+      }
+    }
+
+    function startPCMStreaming(stream) {
+      audioContext = new AudioContext();
+      sourceNode = audioContext.createMediaStreamSource(stream);
+      processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+      processorNode.onaudioprocess = (event) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+        const input = event.inputBuffer.getChannelData(0);
+        const downsampled = downsample(input, audioContext.sampleRate, TARGET_SAMPLE_RATE);
+        const pcm16 = float32ToPCM16(downsampled);
+
+        let sum = 0;
+        for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+        const rms = Math.sqrt(sum / input.length);
+        meterFill.style.width = Math.min(100, rms * 600) + "%";
+
+        ws.send(pcm16.buffer);
+        chunkCount++;
+        chunkCountEl.textContent = chunkCount;
+      };
+
+      sourceNode.connect(processorNode);
+      processorNode.connect(audioContext.destination);
+    }
+
+    function downsample(buffer, inRate, outRate) {
+      if (outRate === inRate) return buffer;
+      const ratio = inRate / outRate;
+      const newLen = Math.round(buffer.length / ratio);
+      const result = new Float32Array(newLen);
+      let off = 0;
+      let src = 0;
+      while (off < result.length) {
+        const next = Math.round((off + 1) * ratio);
+        let accum = 0, count = 0;
+        for (let i = src; i < next && i < buffer.length; i++) {
+          accum += buffer[i];
+          count++;
+        }
+        result[off] = count > 0 ? accum / count : 0;
+        off++;
+        src = next;
+      }
+      return result;
+    }
+
+    function float32ToPCM16(arr) {
+      const pcm = new Int16Array(arr.length);
+      for (let i = 0; i < arr.length; i++) {
+        let s = Math.max(-1, Math.min(1, arr[i]));
+        pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return pcm;
+    }
+  </script>
+</body>
+</html>

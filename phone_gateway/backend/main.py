@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 
+import httpx
 import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.staticfiles import StaticFiles
@@ -41,6 +42,18 @@ VAD_WS_BASE_URL = os.getenv(
     "VAD_WS_BASE_URL",
     "ws://vad-service:8010/ws/vad"
 )
+VAD_UTTERANCES_DIR = Path(
+    os.getenv("VAD_UTTERANCES_DIR", "/app/utterances")
+)
+LOGIC_SERVICE_URL = os.getenv(
+    "LOGIC_SERVICE_URL",
+    "http://host.docker.internal:8002",
+).rstrip("/")
+VOICE_ASK_ENABLED = os.getenv("VOICE_ASK_ENABLED", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 class CallerRegisterRequest(BaseModel):
@@ -112,6 +125,12 @@ def serve_monitor():
     return FileResponse(FRONTEND_DIR / "monitor.html")
 
 
+@app.get("/vad-test")
+def serve_vad_test():
+    """Standalone VAD tester: mic → Silero VAD → events (no STT/LLM/TTS)."""
+    return FileResponse(FRONTEND_DIR / "vad_test.html")
+
+
 @app.get("/health")
 def health_check():
     return {
@@ -152,11 +171,154 @@ def register_caller(payload: CallerRegisterRequest):
     }
 
 
-async def forward_vad_events_to_browser(vad_ws, browser_ws: WebSocket):
+def resolve_utterance_path(utterance_path: str | None) -> Path | None:
+    if not utterance_path:
+        return None
+
+    candidate = Path(utterance_path)
+    if candidate.is_file():
+        return candidate
+
+    by_name = VAD_UTTERANCES_DIR / candidate.name
+    if by_name.is_file():
+        return by_name
+
+    # VAD returns paths like "utterances/<session>_utterance_001.wav"
+    stripped = candidate.as_posix().removeprefix("utterances/").lstrip("/")
+    nested = VAD_UTTERANCES_DIR / stripped
+    if nested.is_file():
+        return nested
+
+    return None
+
+
+async def run_voice_ask_pipeline(
+    *,
+    utterance_path: str | None,
+    session_id: str,
+    caller_phone: str | None,
+    browser_ws: WebSocket,
+) -> None:
+    """
+    After Silero VAD emits speech_ended, send the trimmed WAV through
+    logic_service /voice/ask (STT -> RAG/LLM -> TTS) and relay JSON to browser.
+    """
+    if not VOICE_ASK_ENABLED:
+        return
+
+    wav_path = resolve_utterance_path(utterance_path)
+    if not wav_path:
+        print(
+            f"[VOICE ASK SKIP] session={session_id}, "
+            f"missing utterance file: {utterance_path}",
+            flush=True,
+        )
+        add_event("voice_ask_skipped", {
+            "session_id": session_id,
+            "utterance_path": utterance_path,
+            "error": "utterance file not found",
+        })
+        return
+
+    try:
+        await browser_ws.send_json({
+            "type": "advisor_processing",
+            "session_id": session_id,
+            "message": "Processing your question...",
+        })
+    except Exception:
+        return
+
+    try:
+        audio_bytes = wav_path.read_bytes()
+    except OSError as exc:
+        print(f"[VOICE ASK READ ERROR] session={session_id}, error={exc}", flush=True)
+        add_event("voice_ask_read_error", {
+            "session_id": session_id,
+            "utterance_path": str(wav_path),
+            "error": str(exc),
+        })
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
+            response = await client.post(
+                f"{LOGIC_SERVICE_URL}/voice/ask",
+                files={
+                    "audio_file": (
+                        wav_path.name,
+                        audio_bytes,
+                        "audio/wav",
+                    )
+                },
+                data={
+                    "phone_number": caller_phone or "Unknown",
+                    "session_id": session_id,
+                    "return_audio": "false",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        print(f"[VOICE ASK ERROR] session={session_id}, error={exc}", flush=True)
+        add_event("voice_ask_error", {
+            "session_id": session_id,
+            "utterance_path": str(wav_path),
+            "error": str(exc),
+        })
+        try:
+            await browser_ws.send_json({
+                "type": "advisor_error",
+                "session_id": session_id,
+                "message": "Could not get an answer. Please try again.",
+            })
+        except Exception:
+            pass
+        return
+
+    advisor_message = {
+        "type": "advisor_response",
+        "session_id": session_id,
+        "transcript": payload.get("transcript") or "",
+        "response": payload.get("response") or "",
+        "intent": payload.get("intent") or "",
+        "stt_confidence": payload.get("stt_confidence"),
+        "answer_source": payload.get("answer_source"),
+        "audio_base64": payload.get("audio_base64") or "",
+        "references": payload.get("references") or [],
+    }
+
+    add_event("advisor_response", {
+        "session_id": session_id,
+        "transcript": advisor_message["transcript"],
+        "intent": advisor_message["intent"],
+        "stt_confidence": advisor_message["stt_confidence"],
+    })
+
+    print(
+        f"[VOICE ASK OK] session={session_id}, "
+        f"transcript={advisor_message['transcript'][:80]!r}",
+        flush=True,
+    )
+
+    try:
+        await browser_ws.send_json(advisor_message)
+    except Exception:
+        pass
+
+
+async def forward_vad_events_to_browser(
+    vad_ws,
+    browser_ws: WebSocket,
+    *,
+    session_id: str,
+    caller_phone: str | None,
+):
     """
     Receive VAD events from vad-service.
     Update backend monitor state.
     Also forward VAD events to the caller browser for simple status updates.
+    On speech_ended, run the STT/RAG/TTS pipeline via logic_service.
     """
 
     try:
@@ -186,6 +348,15 @@ async def forward_vad_events_to_browser(vad_ws, browser_ws: WebSocket):
                     utterance_path=data.get("utterance_path"),
                     duration_seconds=data.get("duration_seconds"),
                     speech_probability=data.get("speech_probability"),
+                )
+
+                asyncio.create_task(
+                    run_voice_ask_pipeline(
+                        utterance_path=data.get("utterance_path"),
+                        session_id=session_id,
+                        caller_phone=caller_phone,
+                        browser_ws=browser_ws,
+                    )
                 )
 
             else:
@@ -260,7 +431,12 @@ async def call_websocket(
         print(f"[VAD CONNECTED] {vad_url}", flush=True)
 
         vad_event_task = asyncio.create_task(
-            forward_vad_events_to_browser(vad_ws, websocket)
+            forward_vad_events_to_browser(
+                vad_ws,
+                websocket,
+                session_id=session_id,
+                caller_phone=caller_phone,
+            )
         )
 
         while True:

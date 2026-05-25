@@ -23,6 +23,11 @@ const numberDisplay = document.getElementById("numberDisplay");
 const statusEl = document.getElementById("status");
 const timerEl = document.getElementById("timer");
 const sessionInfo = document.getElementById("sessionInfo");
+const advisorPanel = document.getElementById("advisorPanel");
+const advisorTranscript = document.getElementById("advisorTranscript");
+const advisorResponse = document.getElementById("advisorResponse");
+
+let responseAudio = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   if (numberDisplay && !numberDisplay.value) {
@@ -293,6 +298,24 @@ async function startCall() {
           setStatus("Listening...");
         }
 
+        if (data.type === "advisor_processing") {
+          setStatus("Thinking...");
+        }
+
+        if (data.type === "advisor_error") {
+          setStatus("Error — try again");
+          if (advisorPanel) {
+            advisorPanel.classList.remove("hidden");
+          }
+          if (advisorResponse) {
+            advisorResponse.innerText = data.message || "Could not get an answer.";
+          }
+        }
+
+        if (data.type === "advisor_response") {
+          showAdvisorResponse(data);
+        }
+
         if (data.type === "session_ended") {
           if (sessionInfo) {
             sessionInfo.innerText = "Call ended.";
@@ -408,6 +431,79 @@ function float32ToPCM16(float32Array) {
   return pcm16;
 }
 
+function showAdvisorResponse(data) {
+  if (advisorPanel) {
+    advisorPanel.classList.remove("hidden");
+  }
+
+  if (advisorTranscript) {
+    advisorTranscript.innerText = data.transcript
+      ? `You: ${data.transcript}`
+      : "";
+  }
+
+  if (advisorResponse) {
+    advisorResponse.innerText = data.response
+      ? `Advisor: ${data.response}`
+      : "";
+  }
+
+  if (data.audio_base64) {
+    playBase64Wav(data.audio_base64);
+  } else {
+    setStatus("Listening...");
+  }
+}
+
+function playBase64Wav(base64Audio) {
+  setStatus("Playing answer...");
+
+  try {
+    if (responseAudio) {
+      responseAudio.pause();
+      responseAudio = null;
+    }
+
+    const binary = atob(base64Audio);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+
+    const blob = new Blob([bytes], { type: "audio/wav" });
+    const url = URL.createObjectURL(blob);
+
+    responseAudio = new Audio(url);
+    responseAudio.onended = () => {
+      URL.revokeObjectURL(url);
+      responseAudio = null;
+      if (activeCall) {
+        setStatus("Listening...");
+      }
+    };
+    responseAudio.onerror = () => {
+      URL.revokeObjectURL(url);
+      responseAudio = null;
+      if (activeCall) {
+        setStatus("Listening...");
+      }
+    };
+
+    responseAudio.play().catch((err) => {
+      console.error("Audio playback failed:", err);
+      if (activeCall) {
+        setStatus("Listening...");
+      }
+    });
+  } catch (err) {
+    console.error("Could not decode advisor audio:", err);
+    if (activeCall) {
+      setStatus("Listening...");
+    }
+  }
+}
+
 function endCall() {
   if (!activeCall) return;
 
@@ -415,6 +511,17 @@ function endCall() {
 
   activeCall = false;
   stopTimer();
+
+  if (responseAudio) {
+    responseAudio.pause();
+    responseAudio = null;
+  }
+
+  if (advisorPanel) {
+    advisorPanel.classList.add("hidden");
+  }
+  if (advisorTranscript) advisorTranscript.innerText = "";
+  if (advisorResponse) advisorResponse.innerText = "";
 
   if (websocket && websocket.readyState === WebSocket.OPEN) {
     websocket.send("END_CALL");

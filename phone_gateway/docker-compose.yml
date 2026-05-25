@@ -10,23 +10,36 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U phone_user -d phone_gateway_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   phone-gateway:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: phone_gateway_backend
+    restart: unless-stopped
     depends_on:
-      - postgres
-      - vad-service
+      postgres:
+        condition: service_healthy
+      vad-service:
+        condition: service_started
     environment:
       DATABASE_URL: postgresql://phone_user:phone_pass@postgres:5432/phone_gateway_db
       RECORDINGS_DIR: /app/recordings
       VAD_WS_BASE_URL: ws://vad-service:8010/ws/vad
+      VAD_UTTERANCES_DIR: /app/utterances
+      LOGIC_SERVICE_URL: http://host.docker.internal:8002
     ports:
       - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - call_recordings:/app/recordings
+      - ../vad_service/utterances:/app/utterances:ro
 
   pgadmin:
     image: dpage/pgadmin4

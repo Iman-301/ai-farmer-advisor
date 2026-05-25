@@ -1692,6 +1692,26 @@ async def voice_ask(
     )
 
 
+def _trim_for_tts(text: str, max_chars: int = 600) -> str:
+    """
+    TTS struggles with very long Amharic strings (>~700 chars often times out).
+    Trim to <= max_chars, breaking at the last sentence boundary when possible.
+    """
+    if not text:
+        return ""
+
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    cut = cleaned[:max_chars]
+    for sep in ("። ", "! ", "? ", ". ", "።", "!", "?", "."):
+        idx = cut.rfind(sep)
+        if idx > max_chars * 0.5:
+            return cut[: idx + len(sep)].strip()
+    return cut.strip()
+
+
 def _voice_response_bundle(
     *,
     audio_text: str,
@@ -1704,10 +1724,19 @@ def _voice_response_bundle(
     meta: dict,
     return_audio: bool,
 ):
+    tts_max_chars = int(os.environ.get("TTS_MAX_CHARS", "600"))
+    tts_timeout = int(os.environ.get("TTS_TIMEOUT_SECONDS", "120"))
+    tts_text = _trim_for_tts(audio_text, max_chars=tts_max_chars)
+
     audio_out: bytes = b""
     tts_error: Optional[str] = None
     try:
-        tts_resp = requests.post(TTS_URL, json={"text": audio_text}, timeout=60)
+        logger.info(
+            "TTS request: %d chars (orig %d)", len(tts_text), len(audio_text or "")
+        )
+        tts_resp = requests.post(
+            TTS_URL, json={"text": tts_text}, timeout=tts_timeout
+        )
         if tts_resp.status_code == 200:
             audio_out = tts_resp.content
         else:
