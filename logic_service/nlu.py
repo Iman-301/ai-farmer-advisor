@@ -71,6 +71,11 @@ CROP_KEYWORDS: dict[str, str] = {
     "pepper": "Pepper",
     "ሙንግ": "Mung bean",
     "mung": "Mung bean",
+    # Multi-word entries MUST come before their single-word substrings
+    # (the matcher returns on first hit).
+    "አኩሪ አተር": "Soybean",
+    "soybean": "Soybean",
+    "soya": "Soybean",
     "ሀብት": "Haricot bean",
     "አተር": "Haricot bean",
 }

@@ -49,8 +49,8 @@ RAG_DISTANCE_THRESHOLD = float(os.environ.get("RAG_DISTANCE_THRESHOLD", "1.2"))
 RAG_PG_MAX_L2_DISTANCE = float(os.environ.get("RAG_PG_MAX_L2_DISTANCE", "1.35"))
 TTS_URL = os.environ.get("TTS_URL", "http://tts_service:8002/synthesize")
 STT_URL = os.environ.get("STT_URL", "http://stt_service:8000/transcribe")
-RAG_PG_CANDIDATE_K = int(os.environ.get("RAG_PG_CANDIDATE_K", "16"))
-RAG_PG_FINAL_K = int(os.environ.get("RAG_PG_FINAL_K", "4"))
+RAG_PG_CANDIDATE_K = int(os.environ.get("RAG_PG_CANDIDATE_K", "24"))
+RAG_PG_FINAL_K = int(os.environ.get("RAG_PG_FINAL_K", "6"))
 # When top vector match is weaker than this, also retrieve on raw user text (no NLU hint).
 RAG_WEAK_MATCH_DISTANCE = float(os.environ.get("RAG_WEAK_MATCH_DISTANCE", "0.85"))
 
@@ -431,82 +431,122 @@ def _best_sentences_for_answer(
 def _build_focused_context(query_text: str, hits: list[dict]) -> str:
     """Compact context for LLM: top scored sentences PLUS full chunk content as backup.
 
-    Sending only extracted sentences risks dropping the correct answer if scoring
-    slightly mis-ranks. We now send scored sentences first, then append the full
-    text of all hits so the LLM can scan everything.
+    Each chunk is preceded by a [TITLE: ...] marker so the LLM can cite a real
+    document title instead of inventing one or echoing internal section labels.
     """
     sents = _best_sentences_for_answer(query_text, hits, top_k=6)
     parts: list[str] = []
+
+    # Distinct document titles available for citation
+    seen_titles: list[str] = []
+    for h in hits[:4]:
+        t = (h.get("title") or "").strip()
+        if t and t not in seen_titles:
+            seen_titles.append(t)
+    if seen_titles:
+        parts.append("Available source titles (cite ONLY from this list):")
+        parts.extend(f"  • {t}" for t in seen_titles)
+        parts.append("")
+
     if sents:
-        parts.append("[የተመረጡ ዓረፍተ ነገሮች / Selected sentences]")
+        parts.append("Top extracted sentences (use these as the primary answer source):")
         parts.extend(f"- {s}" for s in sents)
         parts.append("")
-    # Always append full chunks so the LLM can find the answer even if scoring missed it
-    parts.append("[ሙሉ ሰነድ ቁርጥራጮች / Full document chunks]")
+    parts.append("Full retrieved chunks (consult if the extracted sentences are insufficient):")
     for i, h in enumerate(hits[:4], 1):
         body = (h.get("content") or "").strip()
+        title = (h.get("title") or "").strip() or "untitled"
         if body:
-            parts.append(f"[{i}] {body[:900]}")
+            parts.append(f"[CHUNK {i} | TITLE: {title}] {body[:900]}")
     return "\n".join(parts)
 
 
 def _llm_system_prompt(qtype: str = "general") -> str:
     base = (
-        "You are an agricultural advisory assistant for farmers in Ethiopia.\n"
-        "You MUST answer in Amharic only.\n"
-        "Use ONLY the provided context below. Do NOT add outside knowledge.\n"
-        "If the answer is not in the context, reply: \"በቂ መረጃ የለም።\"\n"
+        "You are an expert agricultural advisor for Ethiopian farmers (FR-10 grounded generation).\n"
+        "You MUST answer in clear, natural Amharic only — never English, never mixed languages.\n"
+        "\n"
+        "GROUNDING RULES (CRITICAL — SRS FR-10) — READ BEFORE ANSWERING:\n"
+        "  1. Use ONLY the provided CONTEXT chunks. Do NOT add outside knowledge, opinions, or guesses.\n"
+        "  2. STRICT TOPIC CHECK: Read the user question carefully. Identify the key entities\n"
+        "     (crop, place, technique, problem). If ANY key entity in the question is NOT mentioned\n"
+        "     in the CONTEXT, you MUST refuse and use the fallback below — do NOT improvise from\n"
+        "     loosely related chunks. Example: user asks about Mars/መንግሥተ ሰማይ/Saudi/America but\n"
+        "     context only covers Ethiopia regions → REFUSE.\n"
+        "  3. If the context covers a DIFFERENT crop or DIFFERENT region than the user asked about,\n"
+        "     REFUSE — do not substitute. Example: user asks about wheat, context is only mango → REFUSE.\n"
+        "  4. FALLBACK MESSAGE — when refusing, reply with EXACTLY this and nothing else:\n"
+        "      በቂ መረጃ የለም። ጥያቄዎ በተገኙ ሰነዶች ውስጥ አልተገኘም። እባክዎ ጥያቄዎን በተለየ መንገድ ይጠይቁ ወይም ለግብርና ባለሙያ ይደውሉ።\n"
+        "  5. Do NOT cite documents that don't exist. Use ONLY real source titles you see in the\n"
+        "     CONTEXT block (titles appear as part of the chunks — never invent or paraphrase them).\n"
+        "  6. NEVER write \"ምንጭ: የተመረጡ ዓረፍተ ነገሮች\" or \"ምንጭ: Selected sentences\" —\n"
+        "     those are internal labels, not real document sources.\n"
+        "\n"
+        "STYLE (be expressive and helpful — only when answering, not when refusing):\n"
+        "  - Length must MATCH the available evidence. If the context has rich coverage of the\n"
+        "    topic, write 2-3 paragraphs (~150-220 Amharic words). If the context only gives a\n"
+        "    single fact, answer in 2-4 sentences and STOP. NEVER pad. NEVER repeat the same\n"
+        "    sentence in different words.\n"
+        "  - Each idea appears AT MOST ONCE. Do NOT restate the question. Do NOT restate the\n"
+        "    same fact in the intro and then again in the body.\n"
+        "  - Always finish your last sentence cleanly. Do not stop mid-sentence. If you are\n"
+        "    running long, end earlier with a complete sentence and the citation line.\n"
+        "  - Explain clearly so a farmer with low literacy can understand when read aloud.\n"
+        "  - Use simple words, short sentences, end sentences with the Ethiopic full stop \"።\".\n"
+        "  - If the context mentions specific numbers, units, dates, or place names — keep them verbatim.\n"
+        "  - End with EXACTLY ONE citation line. The citation MUST use a title that\n"
+        "    appears verbatim under \"Available source titles\" in the CONTEXT block.\n"
+        "    Do NOT invent a title. Do NOT use section labels like \"Selected sentences\",\n"
+        "    \"Full document chunks\", \"Top extracted sentences\", \"ሙሉ ሰነድ ቁርጥራጮች\",\n"
+        "    \"የተመረጡ ዓረፍተ ነገሮች\", or chunk numbers like [አንድ]/[1] — those are NOT real titles.\n"
+        "    Format: \"ምንጭ: <real title from the list>\". If no Available source titles are\n"
+        "    listed, omit the citation line entirely.\n"
     )
     if qtype == "why":
         return (
             base
-            + "TASK: The user asks WHY or what is the IMPORTANCE of something.\n"
-            "STEP 1 — Read the user question carefully.\n"
-            "STEP 2 — Scan ALL context chunks (both selected sentences and full chunks).\n"
-            "STEP 3 — Find the sentence(s) that explain the PURPOSE, IMPORTANCE, or REASON.\n"
-            "          Look for phrases like: ፍንጭ ይሰጣል / ለማወቅ ይረዳል / አስፈላጊ ነው / ምክንያቱም\n"
-            "STEP 4 — Output ONLY that explanation in 1-2 sentences.\n"
-            "STRICT RULES:\n"
-            "  - Do NOT mention photos, notes, cameras, app menus, figure numbers, or step-by-step methods.\n"
-            "  - Do NOT summarize how-to instructions.\n"
-            "  - Answer MUST directly explain why/what the importance is.\n"
-            "  - Maximum 2 sentences."
+            + "\nQUESTION TYPE: WHY / IMPORTANCE / REASON.\n"
+            "  - Open with the direct reason in 1-2 sentences.\n"
+            "  - Then expand with the supporting explanation from the context (1-2 short paragraphs).\n"
+            "  - Avoid procedural how-to detail; focus on cause, purpose, importance, or benefit.\n"
+            "  - Use markers from the context like: ምክንያቱም / አስፈላጊ ነው / ለ...ይረዳል / ምክንያቱ ግልጽ ነው።\n"
         )
     if qtype == "how":
         return (
             base
-            + "TASK: The user asks HOW to do something.\n"
-            "Extract only the essential steps from the context.\n"
-            "Reply in at most 4 short bullet points or 3 sentences.\n"
-            "Do NOT include explanations of why, just the steps."
+            + "\nQUESTION TYPE: HOW-TO / METHOD.\n"
+            "  - Open with a one-sentence overview of the goal.\n"
+            "  - Then list the steps as Amharic bullet points (• or -) in the order they should be done.\n"
+            "  - Each bullet: short, actionable, mention quantities/timing if the context has them.\n"
+            "  - End with 1-2 sentences on common pitfalls or what to watch for (only if in context).\n"
         )
     if qtype == "list":
         return (
             base
-            + "TASK: The user asks for a LIST (methods, symptoms, types, options).\n"
-            "STEP 1 — Scan ALL context chunks for items matching the user's question.\n"
-            "STEP 2 — Output EVERY distinct item you find as a separate bullet.\n"
-            "STEP 3 — Keep each bullet short and concrete (1 line, no padding).\n"
-            "STRICT RULES:\n"
-            "  - Use bullet markers like '•' or '-' at the start of each line.\n"
-            "  - Do NOT drop items even if the answer becomes long.\n"
-            "  - Do NOT add 'as follows' or other intro text — go straight to bullets.\n"
-            "  - Do NOT invent items that are not in the context."
+            + "\nQUESTION TYPE: LIST (methods, symptoms, types, options, varieties).\n"
+            "  - List EVERY distinct item found in the context as its own bullet (• or -).\n"
+            "  - Each bullet: 1 short concrete line.\n"
+            "  - Add a brief 1-sentence intro before the bullets and an optional 1-sentence closing tip.\n"
+            "  - Do NOT drop items just to be short. Do NOT invent items.\n"
         )
     if qtype == "objectives":
         return (
             base
-            + "TASK: The user asks for the MAIN OBJECTIVE(S) or PURPOSE of a plan/strategy.\n"
-            "STEP 1 — Find sentences with አጠቃላይ ዓላማ, ዋና ዓላማ, or numbered objective lines (e.g. ዓላማዎች).\n"
-            "STEP 2 — IGNORE introduction, vision, table-of-contents, or project background (መግቢያ, 2025/26).\n"
-            "STEP 3 — Answer in 1-2 sentences or up to 3 short bullets with the actual objectives only.\n"
-            "Do NOT answer with unrelated project goals from the intro paragraph."
+            + "\nQUESTION TYPE: OBJECTIVES / PURPOSE OF A PLAN OR STRATEGY.\n"
+            "  - Look for sections labeled አጠቃላይ ዓላማ / ዋና ዓላማ / ዓላማዎች (numbered or bulleted).\n"
+            "  - IGNORE intro/vision/table-of-contents/background sections.\n"
+            "  - Open with a one-sentence statement of the overall objective.\n"
+            "  - Then list each specific objective as a bullet (• or -).\n"
+            "  - Optional 1-sentence closing on the expected outcome (only if in context).\n"
         )
     return (
         base
-        + "TASK: Answer the user's question directly from the context.\n"
-        "Keep the answer short, practical, and easy to understand.\n"
-        "Maximum 120 words."
+        + "\nQUESTION TYPE: GENERAL ADVISORY.\n"
+        "  - Start with a direct 1-2 sentence answer to the exact question.\n"
+        "  - Then expand with 1-2 supporting paragraphs ONLY if the context has new facts to add.\n"
+        "  - If the context mentions warnings or risks, include them at the end as a short caution.\n"
+        "  - If the context only contains 1-2 facts about the topic, give a SHORT answer (2-4\n"
+        "    sentences) and STOP. Do not invent extra paragraphs to look thorough.\n"
     )
 
 
@@ -537,7 +577,7 @@ def _call_gemini_model(model_name: str, prompt: str) -> Optional[str]:
         prompt,
         generation_config=genai.types.GenerationConfig(
             temperature=0.2,
-            max_output_tokens=int(os.environ.get("LLM_MAX_TOKENS", "600")),
+            max_output_tokens=int(os.environ.get("LLM_MAX_TOKENS", "900")),
         ),
     )
     if getattr(resp, "candidates", None):
@@ -554,6 +594,73 @@ def _call_gemini_model(model_name: str, prompt: str) -> Optional[str]:
 def _is_insufficient_llm_answer(text: str) -> bool:
     t = (text or "").strip()
     return t == "በቂ መረጃ የለም።" or t.startswith("በቂ መረጃ")
+
+
+SRS_FALLBACK_MESSAGE = (
+    "በቂ መረጃ የለም። ጥያቄዎ በተገኙ ሰነዶች ውስጥ አልተገኘም። "
+    "እባክዎ ጥያቄዎን በተለየ መንገድ ይጠይቁ ወይም ለግብርና ባለሙያ ይደውሉ።"
+)
+
+
+# Topics that should NEVER answer from agri KB even if entities partially match.
+# Catches "በማርስ ላይ ጤፍ" (teff is in KB but Mars is nonsense for agronomy).
+_OUT_OF_SCOPE_KEYWORDS = (
+    "ማርስ",        # Mars
+    "ጨረቃ",        # Moon
+    "ፕላኔት",       # Planet (when used as off-Earth)
+    "መንግሥተ ሰማይ",  # Heaven
+    "ጁፒተር",       # Jupiter
+    "ቬነስ",        # Venus
+    "ሳተርን",       # Saturn
+    "ሜርኩሪ",       # Mercury
+    "ኔፕቱን",       # Neptune
+    "ዩራነስ",       # Uranus
+    "ጠፈር",        # Space (outer space)
+    "mars",
+    "moon",
+    "jupiter",
+    "saturn",
+)
+
+
+def _question_is_out_of_scope(query: str) -> bool:
+    """Detect questions about off-planet / non-agricultural settings even if a crop name appears."""
+    q = (query or "").lower()
+    return any(kw in q or kw.lower() in q for kw in _OUT_OF_SCOPE_KEYWORDS)
+
+
+def _all_chunks_too_distant(hits: list[dict], min_distance: float = 1.05) -> bool:
+    """
+    True when even the BEST chunk is too far semantically. Used as a soft "no relevant
+    content" guard for questions where escalation threshold (1.35) is too loose.
+    """
+    if not hits:
+        return True
+    return min(float(h.get("distance") or 999.0) for h in hits) > min_distance
+
+# Internal labels that must never appear in user-facing citations.
+_BAD_CITATION_REGEXES = (
+    # Old label-style citations
+    re.compile(r"ምንጭ\s*[:፦]\s*የተመረጡ ዓረፍተ ነገሮች[።\.]?"),
+    re.compile(r"ምንጭ\s*[:፦]\s*[Ss]elected sentences[።\.]?"),
+    re.compile(r"ምንጭ\s*[:፦]\s*ሙሉ ሰነድ ቁርጥራጮች\s*\[[^\]]*\][።\.]?"),
+    re.compile(r"ምንጭ\s*[:፦]\s*Full document chunks[^\n]*", re.IGNORECASE),
+    re.compile(r"ምንጭ\s*[:፦]\s*Top extracted sentences[^\n]*", re.IGNORECASE),
+    re.compile(r"ምንጭ\s*[:፦]\s*CHUNK[^\n]*", re.IGNORECASE),
+    # Bare chunk-number citations like "ምንጭ: [አንድ]" or "ምንጭ: [1]"
+    re.compile(r"ምንጭ\s*[:፦]\s*\[?(?:አንድ|ሁለት|ሦስት|አራት|\d+)\]?[።\.]?\s*$", re.MULTILINE),
+    re.compile(r"የተመረጡ ዓረፍተ ነገሮች[።\.]"),
+)
+
+
+def _strip_bad_citations(text: str) -> str:
+    """Remove citations that point to internal context labels rather than real documents."""
+    if not text:
+        return text
+    cleaned = text
+    for rx in _BAD_CITATION_REGEXES:
+        cleaned = rx.sub("", cleaned)
+    return cleaned.strip()
 
 
 def _answer_meta(answer_source: str) -> dict:
@@ -695,10 +802,55 @@ def generate_amharic_answer_llm(
             if llm_last_status.get("state") not in ("quota_exceeded", "error"):
                 _set_llm_status("error", "all Gemini models failed")
             logger.warning(
-                "Gemini unavailable (%s, api_calls=%s); returning unmodified RAG chunks.",
+                "Gemini unavailable (%s, api_calls=%s); trying Groq fallback if configured.",
                 llm_last_status.get("state"),
                 _gemini_call_counter,
             )
+
+            # ── Groq fallback (used when Gemini is primary and hits quota/error) ──
+            if (
+                os.environ.get("LLM_GEMINI_FALLBACK_GROQ", "1").strip().lower() in ("1", "true")
+                and (os.environ.get("OPENAI_API_KEY") or "").strip()
+            ):
+                fallback_client = _openai_client()
+                if fallback_client:
+                    base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
+                    backend = "groq" if "groq.com" in base.lower() else "openai"
+                    logger.info(
+                        "Trying %s fallback after Gemini failure (state=%s)",
+                        backend,
+                        llm_last_status.get("state"),
+                    )
+                    print(
+                        f"[logic_service] Gemini {llm_last_status.get('state')} — "
+                        f"trying {backend} fallback",
+                        flush=True,
+                    )
+                    try:
+                        messages = [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ]
+                        resp = fallback_client.chat.completions.create(
+                            model=OPENAI_MODEL,
+                            messages=messages,
+                            temperature=0.2,
+                            max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "900")),
+                            presence_penalty=float(os.environ.get("LLM_PRESENCE_PENALTY", "0.6")),
+                            frequency_penalty=float(os.environ.get("LLM_FREQUENCY_PENALTY", "0.5")),
+                        )
+                        out = (resp.choices[0].message.content or "").strip()
+                        if out:
+                            llm_provider_active = f"{backend}-fallback:{OPENAI_MODEL}"
+                            _set_llm_status("ok", f"{backend}-fallback:{OPENAI_MODEL}")
+                            print(
+                                f"[logic_service] {backend} fallback OK after Gemini failure",
+                                flush=True,
+                            )
+                            return out
+                    except Exception as exc:
+                        logger.warning("%s fallback also failed: %s", backend, exc)
+                        print(f"[logic_service] {backend} fallback failed: {exc}", flush=True)
 
     # OpenAI-compatible APIs (OpenAI, Groq, etc.)
     if provider == "openai":
@@ -733,7 +885,9 @@ def generate_amharic_answer_llm(
                     model=OPENAI_MODEL,
                     messages=messages,
                     temperature=0.2,
-                    max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "600")),
+                    max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "900")),
+                    presence_penalty=float(os.environ.get("LLM_PRESENCE_PENALTY", "0.6")),
+                    frequency_penalty=float(os.environ.get("LLM_FREQUENCY_PENALTY", "0.5")),
                 )
                 out = (resp.choices[0].message.content or "").strip()
                 if out:
@@ -862,11 +1016,120 @@ UNIT_MAP = {
 }
 
 
-def normalize_text(text: str) -> str:
-    """Expand agricultural units/abbreviations for natural TTS pronunciation."""
-    for pattern, replacement in UNIT_MAP.items():
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+# ── Amharic Number Verbalization (for TTS) ───────────────────────────────────
+# Native Amharic word forms for digits 0-19, 20, 30, ..., 100, 1000, 1000000.
+_AM_DIGITS = {
+    0: "ዜሮ", 1: "አንድ", 2: "ሁለት", 3: "ሦስት", 4: "አራት",
+    5: "አምስት", 6: "ስድስት", 7: "ሰባት", 8: "ስምንት", 9: "ዘጠኝ",
+    10: "አስር", 11: "አስራ አንድ", 12: "አስራ ሁለት", 13: "አስራ ሦስት",
+    14: "አስራ አራት", 15: "አስራ አምስት", 16: "አስራ ስድስት", 17: "አስራ ሰባት",
+    18: "አስራ ስምንት", 19: "አስራ ዘጠኝ",
+}
+_AM_TENS = {
+    20: "ሃያ", 30: "ሰላሳ", 40: "አርባ", 50: "ሃምሳ", 60: "ስድሳ",
+    70: "ሰባ", 80: "ሰማንያ", 90: "ዘጠና",
+}
+
+
+def _amharic_integer(n: int) -> str:
+    """Convert a non-negative integer to spoken Amharic (best-effort up to 10^9)."""
+    if n < 0:
+        return "ሲቀነስ " + _amharic_integer(-n)
+    if n < 20:
+        return _AM_DIGITS[n]
+    if n < 100:
+        tens, ones = divmod(n, 10)
+        base = _AM_TENS[tens * 10]
+        return base if ones == 0 else f"{base} {_AM_DIGITS[ones]}"
+    if n < 1000:
+        hundreds, rest = divmod(n, 100)
+        head = "መቶ" if hundreds == 1 else f"{_AM_DIGITS[hundreds]} መቶ"
+        return head if rest == 0 else f"{head} {_amharic_integer(rest)}"
+    if n < 1_000_000:
+        thousands, rest = divmod(n, 1000)
+        head = "ሺ" if thousands == 1 else f"{_amharic_integer(thousands)} ሺ"
+        return head if rest == 0 else f"{head} {_amharic_integer(rest)}"
+    if n < 1_000_000_000:
+        millions, rest = divmod(n, 1_000_000)
+        head = "ሚሊዮን" if millions == 1 else f"{_amharic_integer(millions)} ሚሊዮን"
+        return head if rest == 0 else f"{head} {_amharic_integer(rest)}"
+    return str(n)
+
+
+def _amharic_number(token: str) -> str:
+    """Convert a numeric token (possibly with a decimal) to Amharic words."""
+    token = token.replace(",", "")
+    try:
+        if "." in token:
+            int_part, dec_part = token.split(".", 1)
+            int_val = int(int_part) if int_part else 0
+            int_words = _amharic_integer(int_val)
+            dec_words = " ".join(_AM_DIGITS[int(d)] for d in dec_part if d.isdigit())
+            return f"{int_words} ነጥብ {dec_words}".strip()
+        return _amharic_integer(int(token))
+    except (ValueError, KeyError):
+        return token
+
+
+def _verbalize_numbers(text: str) -> str:
+    """
+    Replace numbers in `text` with their Amharic spoken form so TTS reads them correctly.
+    Handles ranges (500-1000), decimals (1.5), grouped numbers (1,000), and percentages.
+
+    Why we use (?<!\\d)/(?!\\d) instead of \\b: Python's \\b sees Ethiopic letters as
+    word chars, so \\b between e.g. 'ለ' and '1' does NOT trigger, leaving the leading
+    digit untouched and only converting the part after a dot. Lookahead/lookbehind
+    avoid that pitfall while still preventing matches in the middle of longer numbers.
+    """
+    # Ranges: 500-1000  →  ከ five-hundred እስከ one-thousand
+    def _range_repl(m: re.Match) -> str:
+        a, b = m.group(1), m.group(2)
+        return f"ከ{_amharic_number(a)} እስከ {_amharic_number(b)}"
+
+    text = re.sub(
+        r"(?<!\d)(\d+(?:[\.,]\d+)?)\s*[-–]\s*(\d+(?:[\.,]\d+)?)(?!\d)",
+        _range_repl,
+        text,
+    )
+    # Percent: 50% → ሃምሳ በመቶ
+    text = re.sub(
+        r"(?<!\d)(\d+(?:[\.,]\d+)?)\s*%",
+        lambda m: f"{_amharic_number(m.group(1))} በመቶ",
+        text,
+    )
+    # Remaining single numbers (decimal or integer)
+    text = re.sub(
+        r"(?<!\d)\d+(?:[\.,]\d+)?(?!\d)",
+        lambda m: _amharic_number(m.group(0)),
+        text,
+    )
     return text
+
+
+def normalize_text(text: str) -> str:
+    """
+    Prepare LLM output for natural TTS:
+      1. Expand agricultural unit abbreviations.
+      2. Verbalize numbers (1.5 → አንድ ነጥብ አምስት) so the Amharic VITS reads them.
+
+    Citation lines (anything starting with "ምንጭ:") are passed through unchanged so
+    document filename prefixes like "013_..." don't get mangled into Amharic words.
+    Controlled by env TTS_VERBALIZE_NUMBERS=1 (default on).
+    """
+    do_numbers = os.environ.get("TTS_VERBALIZE_NUMBERS", "1") in ("1", "true", "True")
+
+    def _process_line(line: str) -> str:
+        stripped = line.lstrip()
+        # Skip citation lines so titles like "013 irrigation..." stay intact.
+        if stripped.startswith("ምንጭ:") or stripped.startswith("ምንጭ ") or stripped.startswith("ምንጭ፦"):
+            return line
+        for pattern, replacement in UNIT_MAP.items():
+            line = re.sub(pattern, replacement, line, flags=re.IGNORECASE)
+        if do_numbers:
+            line = _verbalize_numbers(line)
+        return line
+
+    return "\n".join(_process_line(ln) for ln in text.splitlines())
 
 
 # ── Language Detection ───────────────────────────────────────────────────────
@@ -924,6 +1187,12 @@ def generate_rag_response(query_text: str, phone_number: str, session_id: str):
         resp = "እባክዎ ጥያቄዎን በአማርኛ ይናገሩ።"  # Please ask your question in Amharic.
         log_conversation(phone_number, session_id, "assistant", resp)
         return resp, "non_amharic", [], {}, _answer_meta("system")
+
+    # ── Out-of-Scope Guard (FR-10: ground only on KB, never about planets/space) ─
+    if _question_is_out_of_scope(query_text):
+        logger.info("Out-of-scope keyword detected; serving SRS fallback.")
+        log_conversation(phone_number, session_id, "assistant", SRS_FALLBACK_MESSAGE)
+        return SRS_FALLBACK_MESSAGE, "out_of_scope", [], {}, _answer_meta("system")
 
     nlu = analyze_intent(query_text)
     logger.info("NLU intent=%s conf=%.2f entities=%s", nlu.primary_intent, nlu.confidence, nlu.entities)
@@ -1459,6 +1728,17 @@ def generate_rag_response(query_text: str, phone_number: str, session_id: str):
             log_conversation(phone_number, session_id, "assistant", resp)
             return resp, "escalated", [], nlu.to_dict(), _answer_meta("system")
 
+        # ── Weak-match guard: even if no escalation, if every chunk is far we
+        #     should not pretend we have an answer. Serve SRS fallback instead.
+        if _all_chunks_too_distant(hits, min_distance=float(os.environ.get("RAG_MIN_BEST_DISTANCE", "1.05"))):
+            logger.info(
+                "Weak-match guard: best_distance=%.3f > min (%s). Serving SRS fallback.",
+                min(float(h.get("distance") or 999.0) for h in hits),
+                os.environ.get("RAG_MIN_BEST_DISTANCE", "1.05"),
+            )
+            log_conversation(phone_number, session_id, "assistant", SRS_FALLBACK_MESSAGE)
+            return SRS_FALLBACK_MESSAGE, "low_confidence", [], nlu.to_dict(), _answer_meta("system")
+
         references = [
             {
                 "chunk_id": h["chunk_id"],
@@ -1553,7 +1833,7 @@ def generate_rag_response(query_text: str, phone_number: str, session_id: str):
         log_conversation(phone_number, session_id, "assistant", resp)
         return resp, "requires_confirmation", references, nlu.to_dict(), _answer_meta("system")
 
-    final_response = alerts_text + normalize_text(response_text)
+    final_response = alerts_text + _strip_bad_citations(normalize_text(response_text))
     log_conversation(phone_number, session_id, "assistant", final_response)
     return final_response, intent, references, nlu.to_dict(), _answer_meta(answer_source)
 

@@ -1,6 +1,8 @@
 from fastapi import FastAPI, UploadFile, File
 import aiofiles
+import asyncio
 import os
+import time
 import uuid
 import math
 import logging
@@ -51,6 +53,52 @@ except Exception as e:
 # BCP-47 language code passed to transcribe(); default am for this product.
 _WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "am").strip() or "am"
 
+# ── Decoding tuning ──────────────────────────────────────────────────────────
+# beam_size=1 (greedy) is 3-5x faster on CPU than beam=5; we still get good
+# Amharic accuracy from the fine-tuned model.
+_BEAM_SIZE = int(os.environ.get("WHISPER_BEAM_SIZE", "1"))
+# Hard wall-clock cap for a single transcription. If exceeded we abort and
+# return empty text so the caller doesn't hang for minutes. Whisper hallucinates
+# repetition loops on noisy/silent audio (\"ነው ነው ነው...\") that can run 5-9 min.
+_TRANSCRIBE_TIMEOUT_S = float(os.environ.get("WHISPER_TIMEOUT_S", "30"))
+
+
+def _do_transcribe(temp_filename: str):
+    """Run faster-whisper with anti-hallucination/anti-loop decoding params."""
+    segments, info = asr_model.transcribe(
+        temp_filename,
+        language=_WHISPER_LANGUAGE,
+        beam_size=_BEAM_SIZE,
+        # ── Anti-repetition / anti-hallucination guards ───────────────────────
+        # Don't feed previous output back in — biggest single cause of
+        # "ነው ነው ነው..." infinite-loop transcriptions on noisy audio.
+        condition_on_previous_text=False,
+        # Auto-discard segments whose gzip compression ratio is too high
+        # (indicates repetition like "ነው ነው ነው") and segments whose avg
+        # log-prob is too low (pure noise).
+        compression_ratio_threshold=2.2,
+        log_prob_threshold=-1.0,
+        # Skip pure-silence/noise frames instead of inventing text.
+        no_speech_threshold=0.6,
+        # Block 3-gram repetition during decoding itself.
+        repetition_penalty=1.15,
+        no_repeat_ngram_size=3,
+        # Single low temperature → faster, but allow fallback if quality is poor.
+        temperature=[0.0, 0.2, 0.4],
+        # Built-in VAD to skip silence inside the audio.
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=500),
+    )
+    text_parts = []
+    log_probs = []
+    for segment in segments:
+        text_parts.append(segment.text.strip())
+        if hasattr(segment, "avg_logprob") and segment.avg_logprob is not None:
+            log_probs.append(math.exp(max(segment.avg_logprob, -10)))
+    text = " ".join(text_parts).strip()
+    confidence = round(sum(log_probs) / len(log_probs), 3) if log_probs else 0.0
+    return text, confidence
+
 
 @app.post("/transcribe")
 async def transcribe(audio_file: UploadFile = File(...)):
@@ -59,7 +107,7 @@ async def transcribe(audio_file: UploadFile = File(...)):
     and returns the transcription text with an average confidence score.
 
     Returns:
-        {"text": str, "confidence": float}  on success
+        {"text": str, "confidence": float}  on success / timeout
         {"text": "", "confidence": 0.0, "error": str}  on failure
     """
     orig = audio_file.filename or ""
@@ -67,33 +115,40 @@ async def transcribe(audio_file: UploadFile = File(...)):
     if ext not in (".wav", ".ogg", ".opus", ".mp3", ".webm", ".flac", ".m4a"):
         ext = ".wav"
     temp_filename = f"temp_{uuid.uuid4()}{ext}"
+    started = time.time()
     try:
-        # Save the uploaded audio to a temp file
-        async with aiofiles.open(temp_filename, 'wb') as out_file:
+        async with aiofiles.open(temp_filename, "wb") as out_file:
             content = await audio_file.read()
             await out_file.write(content)
 
-        # Transcribe (default language am; override with WHISPER_LANGUAGE)
-        segments, info = asr_model.transcribe(
-            temp_filename,
-            language=_WHISPER_LANGUAGE,
-            beam_size=5,
-            vad_filter=True,          # built-in VAD to skip silence
-            vad_parameters=dict(min_silence_duration_ms=500)
+        # Run blocking faster-whisper in a thread with a hard timeout so the
+        # caller never waits longer than _TRANSCRIBE_TIMEOUT_S.
+        try:
+            text, confidence = await asyncio.wait_for(
+                asyncio.to_thread(_do_transcribe, temp_filename),
+                timeout=_TRANSCRIBE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.time() - started
+            logger.warning(
+                "Transcription aborted after %.1fs hard timeout (limit=%.1fs). "
+                "Likely a noisy clip Whisper got stuck on; returning empty.",
+                elapsed,
+                _TRANSCRIBE_TIMEOUT_S,
+            )
+            return {
+                "text": "",
+                "confidence": 0.0,
+                "error": f"transcription timeout after {elapsed:.1f}s",
+            }
+
+        elapsed = time.time() - started
+        logger.info(
+            "Transcription: '%s' | Confidence: %s | took=%.2fs",
+            text,
+            confidence,
+            elapsed,
         )
-
-        text_parts = []
-        log_probs = []
-        for segment in segments:
-            text_parts.append(segment.text.strip())
-            # avg_logprob is negative; convert to 0-1 confidence
-            if hasattr(segment, 'avg_logprob') and segment.avg_logprob is not None:
-                log_probs.append(math.exp(max(segment.avg_logprob, -10)))
-
-        text = " ".join(text_parts).strip()
-        confidence = round(sum(log_probs) / len(log_probs), 3) if log_probs else 0.0
-
-        logger.info(f"Transcription: '{text}' | Confidence: {confidence}")
         return {"text": text, "confidence": confidence}
 
     except Exception as e:

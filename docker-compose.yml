@@ -53,13 +53,28 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.groq.com/openai/v1}
       - OPENAI_MODEL=${OPENAI_MODEL:-llama-3.3-70b-versatile}
-      # Gemini fallback (used only when Groq returns 429 / error)
+      # Gemini config (primary when LLM_PROVIDER=gemini, fallback otherwise)
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-lite}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
       - LLM_GROQ_FALLBACK_GEMINI=${LLM_GROQ_FALLBACK_GEMINI:-1}
-      # TTS: keep voice answers short so live calls stay snappy (CPU VITS is slow)
-      - TTS_MAX_CHARS=${TTS_MAX_CHARS:-250}
-      - TTS_TIMEOUT_SECONDS=${TTS_TIMEOUT_SECONDS:-180}
+      - LLM_GEMINI_FALLBACK_GROQ=${LLM_GEMINI_FALLBACK_GROQ:-1}
+      # TTS: full expressive voice answer (per defense requirement).
+      # Warning: ~600 chars => ~90-120s synthesis time on CPU mms-tts-amh.
+      # Lower this (e.g. 180-250) if you want snappier live calls.
+      - TTS_MAX_CHARS=${TTS_MAX_CHARS:-600}
+      - TTS_TIMEOUT_SECONDS=${TTS_TIMEOUT_SECONDS:-240}
+      # LLM: longer, more expressive Amharic answers (1500 prevents mid-sentence cutoffs)
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-1500}
+      # Anti-repetition penalties for Groq/OpenAI compatible chat completions
+      - LLM_PRESENCE_PENALTY=${LLM_PRESENCE_PENALTY:-0.6}
+      - LLM_FREQUENCY_PENALTY=${LLM_FREQUENCY_PENALTY:-0.5}
+      # RAG: pull more candidates and pass more chunks to the LLM for richer answers
+      - RAG_PG_CANDIDATE_K=${RAG_PG_CANDIDATE_K:-24}
+      - RAG_PG_FINAL_K=${RAG_PG_FINAL_K:-6}
+      # Soft guard: if even the best chunk is farther than this, refuse with SRS fallback
+      - RAG_MIN_BEST_DISTANCE=${RAG_MIN_BEST_DISTANCE:-1.05}
+      # Verbalize numbers in Amharic before TTS (1.5 → አንድ ነጥብ አምስት)
+      - TTS_VERBALIZE_NUMBERS=${TTS_VERBALIZE_NUMBERS:-1}
     volumes:
       - ./logic_service:/app
       - ./data:/data

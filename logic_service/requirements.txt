@@ -12,7 +12,7 @@ langchain-community
 # llama-cpp-python              # requires VS C++ on Windows; install manually if needed
 requests
 openai>=1.0.0                # Groq (free) + OpenAI-compatible APIs — set OPENAI_BASE_URL for Groq
-# google-generativeai>=0.8.0  # disabled — hit free quota; re-enable if switching back to Gemini
+google-generativeai>=0.8.0   # Gemini fallback when Groq returns 429 / hits daily token quota
 bcrypt
 pdfminer.six
 PyMuPDF>=1.23.0
