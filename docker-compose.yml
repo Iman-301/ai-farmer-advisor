@@ -21,15 +21,15 @@ services:
     ports:
       - "8001:8000"
     environment:
-      # Local fine-tuned CTranslate2 model (host: ./models → container /models)
       - WHISPER_MODEL_PATH=/models/asr/whisper-small-amharic-bdu-8khz-aug-ct2-fp16
-      # Fallback if the path is missing (e.g. fresh clone without weights)
       - WHISPER_MODEL=small
       - WHISPER_LANGUAGE=am
       - WHISPER_THREADS=8
+      - SHARED_UTTERANCES_DIR=/shared/utterances
     volumes:
       - ./data:/data
       - ./models:/models:ro
+      - ./vad_service/utterances:/shared/utterances
 
   logic_service:
     build: ./logic_service
@@ -58,11 +58,13 @@ services:
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
       - LLM_GROQ_FALLBACK_GEMINI=${LLM_GROQ_FALLBACK_GEMINI:-1}
       - LLM_GEMINI_FALLBACK_GROQ=${LLM_GEMINI_FALLBACK_GROQ:-1}
-      # TTS: full expressive voice answer (per defense requirement).
-      # Warning: ~600 chars => ~90-120s synthesis time on CPU mms-tts-amh.
-      # Lower this (e.g. 180-250) if you want snappier live calls.
-      - TTS_MAX_CHARS=${TTS_MAX_CHARS:-600}
-      - TTS_TIMEOUT_SECONDS=${TTS_TIMEOUT_SECONDS:-240}
+      # TTS: Google gTTS (fast) — sentence streaming in VAD handles perceived latency
+      - TTS_MAX_CHARS=${TTS_MAX_CHARS:-400}
+      - TTS_TIMEOUT_SECONDS=${TTS_TIMEOUT_SECONDS:-60}
+      # Voice RAG fast path
+      - RAG_VOICE_COMPOSE_FIRST=${RAG_VOICE_COMPOSE_FIRST:-1}
+      - RAG_VOICE_RAG_ANSWER_MAX_CHARS=${RAG_VOICE_RAG_ANSWER_MAX_CHARS:-600}
+      - RAG_RESPONSE_CACHE_TTL_SEC=${RAG_RESPONSE_CACHE_TTL_SEC:-120}
       # LLM: longer, more expressive Amharic answers (1500 prevents mid-sentence cutoffs)
       - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-1500}
       # Anti-repetition penalties for Groq/OpenAI compatible chat completions
@@ -91,6 +93,11 @@ services:
     build: ./tts_service
     ports:
       - "8003:8000"
+    environment:
+      - TTS_PROVIDER=${TTS_PROVIDER:-gtts}
+      - TTS_LANG=${TTS_LANG:-am}
+      - TTS_SAMPLE_RATE=${TTS_SAMPLE_RATE:-16000}
+      - TTS_ATEMPO=${TTS_ATEMPO:-1.15}
     volumes:
       - ./data:/data
 

@@ -1,19 +1,20 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { fetchStats } from '@/lib/api';
-import type { AdminStats } from '@/types';
-import { Users, Phone, AlertCircle, BookOpen } from 'lucide-react';
+import { fetchAnalyticsSummary, fetchStats } from '@/lib/api';
+import type { AdminStats, AnalyticsSummary } from '@/types';
+import { Phone, ClipboardList, HeadphonesIcon, BarChart2 } from 'lucide-react';
 import StatCard from '@/components/ui/StatCard';
 
 export default function Dashboard() {
   const [stats, setStats]     = useState<AdminStats | null>(null);
+  const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
   const [error, setError]     = useState('');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetchStats()
-      .then(setStats)
+    Promise.all([fetchStats(), fetchAnalyticsSummary().catch(() => null)])
+      .then(([s, a]) => { setStats(s); setSummary(a); })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
@@ -22,43 +23,62 @@ export default function Dashboard() {
   if (error)   return <ErrorState message={error} />;
   if (!stats)  return null;
 
-  const cards = [
-    { label: 'Registered Farmers',   value: stats.total_farmers,        icon: <Users size={20} />,       bg: 'bg-blue-50',   text: 'text-blue-500' },
-    { label: 'Calls Today',           value: stats.calls_today,          icon: <Phone size={20} />,       bg: 'bg-green-50',  text: 'text-green-500' },
-    { label: 'Pending Escalations',   value: stats.pending_escalations,  icon: <AlertCircle size={20} />, bg: 'bg-orange-50', text: 'text-orange-500' },
-    { label: 'Knowledge Base Entries',value: stats.kb_count,             icon: <BookOpen size={20} />,    bg: 'bg-purple-50', text: 'text-purple-500' },
-  ];
-
-  const resolved = stats.escalation_breakdown['resolved'] ?? 0;
-  const pending  = stats.escalation_breakdown['pending']  ?? 0;
-  const total    = resolved + pending || 1; // avoid divide by zero
+  const openCases =
+    (stats.escalation_breakdown['pending'] ?? 0) +
+    (stats.escalation_breakdown['assigned'] ?? 0);
+  const closedCases =
+    (stats.escalation_breakdown['answered'] ?? 0) +
+    (stats.escalation_breakdown['closed'] ?? 0) +
+    (stats.escalation_breakdown['resolved'] ?? 0);
 
   return (
     <div className="space-y-8">
       {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-        {cards.map((card) => (
-          <StatCard
-            key={card.label}
-            label={card.label}
-            value={card.value}
-            icon={card.icon}
-            iconBgColorClass={card.bg}
-            iconTextColorClass={card.text}
-          />
-        ))}
+        <StatCard
+          label="Calls Today"
+          value={stats.calls_today}
+          icon={<Phone size={20} />}
+          iconBgColorClass="bg-green-50"
+          iconTextColorClass="text-green-600"
+        />
+        <StatCard
+          label="Call Logs (all time)"
+          value={stats.total_calls}
+          icon={<ClipboardList size={20} />}
+          iconBgColorClass="bg-blue-50"
+          iconTextColorClass="text-blue-600"
+        />
+        <StatCard
+          label="Helpdesk Open Cases"
+          value={openCases}
+          icon={<HeadphonesIcon size={20} />}
+          iconBgColorClass="bg-amber-50"
+          iconTextColorClass="text-amber-600"
+        />
+        <StatCard
+          label="Helpdesk Closed Cases"
+          value={closedCases}
+          icon={<HeadphonesIcon size={20} />}
+          iconBgColorClass="bg-slate-100"
+          iconTextColorClass="text-slate-600"
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* System overview */}
+        {/* Analytics summary */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="px-8 py-6 border-b border-slate-100">
-            <h3 className="text-base font-medium text-slate-800">System Overview</h3>
+            <h3 className="text-base font-medium text-slate-800 flex items-center gap-2">
+              <BarChart2 size={16} />
+              Analytics Summary
+            </h3>
           </div>
           <div className="px-8 pb-8 pt-2 divide-y divide-slate-100">
-            <Row label="Total Calls (all time)" value={String(stats.total_calls)} />
-            <Row label="Total Alerts Broadcast"  value={String(stats.total_alerts)} />
-            <Row label="Escalations Resolved"    value={`${resolved} / ${resolved + pending}`} />
+            <Row label="Total Farmers" value={summary ? String(summary.total_farmers) : String(stats.total_farmers)} />
+            <Row label="Calls (last 30 days)" value={summary ? String(summary.calls_30d) : '—'} />
+            <Row label="New Farmers (last 30 days)" value={summary ? String(summary.new_farmers_30d) : '—'} />
+            <Row label="Open Escalations" value={summary ? String(summary.open_escalations) : String(openCases)} />
           </div>
         </div>
 
@@ -77,34 +97,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Escalation breakdown */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-8 py-6 border-b border-slate-100">
-          <h3 className="text-base font-medium text-slate-800">Escalation Resolution Rate</h3>
-        </div>
-        <div className="px-8 py-6">
-          <div className="flex items-center gap-4 mb-2">
-            <span className="text-sm text-slate-500 w-20">Resolved</span>
-            <div className="flex-1 bg-slate-100 rounded-full h-2.5">
-              <div
-                className="bg-green-500 h-2.5 rounded-full transition-all duration-700"
-                style={{ width: `${(resolved / total) * 100}%` }}
-              />
-            </div>
-            <span className="text-sm font-medium text-slate-700 w-8">{resolved}</span>
-          </div>
-          <div className="flex items-center gap-4">
-            <span className="text-sm text-slate-500 w-20">Pending</span>
-            <div className="flex-1 bg-slate-100 rounded-full h-2.5">
-              <div
-                className="bg-amber-400 h-2.5 rounded-full transition-all duration-700"
-                style={{ width: `${(pending / total) * 100}%` }}
-              />
-            </div>
-            <span className="text-sm font-medium text-slate-700 w-8">{pending}</span>
-          </div>
-        </div>
-      </div>
+      {/* Keep the rest of the dashboard lightweight; detailed escalation stats live in /helpdesk and /analytics */}
     </div>
   );
 }

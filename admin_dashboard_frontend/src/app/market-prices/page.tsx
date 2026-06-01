@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { fetchMarketPrices, addMarketPrice } from '@/lib/api';
-import { isAdmin } from '@/lib/auth';
+import { hasRole } from '@/lib/auth';
 import type { MarketPrice } from '@/types';
 
 const REGIONS = ['Addis Ababa', 'Oromia', 'Amhara', 'SNNPR', 'Tigray', 'Sidama', 'Afar'];
@@ -13,7 +13,7 @@ export default function MarketPrices() {
   const [error, setError]       = useState('');
   const [toast, setToast]       = useState('');
   const [saving, setSaving]     = useState(false);
-  const admin = typeof window !== 'undefined' ? isAdmin() : false;
+  const canEdit = typeof window !== 'undefined' ? hasRole('admin', 'da') : false;
 
   // Form state
   const [crop, setCrop]     = useState('');
@@ -57,8 +57,8 @@ export default function MarketPrices() {
         </div>
       )}
 
-      {/* Add price form — admin only */}
-      {admin ? (
+      {/* Add price form — admin or DA */}
+      {canEdit ? (
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden mt-8">
           <div className="px-8 py-6 border-b border-slate-100">
             <h3 className="text-base font-medium text-slate-800">Add / Update Price</h3>
@@ -115,7 +115,7 @@ export default function MarketPrices() {
         </div>
       ) : (
         <div className="mt-8 bg-blue-50 border border-blue-200 rounded-xl p-6">
-          <p className="text-sm font-medium text-blue-700">👀 View only — only admins can add prices.</p>
+          <p className="text-sm font-medium text-blue-700">View only — only admins or DAs can add prices.</p>
         </div>
       )}
 
@@ -165,7 +165,7 @@ export default function MarketPrices() {
                 )) : (
                   <tr>
                     <td colSpan={5} className="py-16 text-center text-sm text-slate-400">
-                      No market prices yet. {admin ? 'Use the form above to add one.' : ''}
+                      No market prices yet. {canEdit ? 'Use the form above to add one.' : ''}
                     </td>
                   </tr>
                 )}

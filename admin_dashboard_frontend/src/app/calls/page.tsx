@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
+import Link from 'next/link';
 import { fetchCalls } from '@/lib/api';
+import { getToken } from '@/lib/auth';
 import type { CallLog } from '@/types';
+import AudioPlayer from '@/components/ui/AudioPlayer';
 
 export default function CallLogs() {
   const [calls, setCalls]         = useState<CallLog[]>([]);
@@ -27,6 +30,12 @@ export default function CallLogs() {
       (c.session_id ?? '').toLowerCase().includes(q)
     );
   });
+
+  const audioUrlForCall = (call: CallLog) => {
+    const token = typeof window !== 'undefined' ? getToken() : null;
+    const suffix = token ? `?token=${token}` : '';
+    return `/api/admin/calls/${encodeURIComponent(call.session_id ?? String(call.id))}/audio${suffix}`;
+  };
 
   return (
     <div className="space-y-6">
@@ -59,11 +68,12 @@ export default function CallLogs() {
                   <th className="py-4 px-8 text-xs font-semibold text-slate-500 uppercase tracking-wide">Duration</th>
                   <th className="py-4 px-8 text-xs font-semibold text-slate-500 uppercase tracking-wide">Timestamp</th>
                   <th className="py-4 px-8 text-xs font-semibold text-slate-500 uppercase tracking-wide">Audio</th>
+                  <th className="py-4 px-8 text-xs font-semibold text-slate-500 uppercase tracking-wide text-right">Transcript</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filtered.length > 0 ? filtered.map((c) => (
-                  <>
+                  <Fragment key={c.id}>
                     <tr
                       key={c.id}
                       className="hover:bg-slate-50 transition-colors"
@@ -93,26 +103,36 @@ export default function CallLogs() {
                           <span className="text-xs text-slate-300">No recording</span>
                         )}
                       </td>
+                      <td className="py-4 px-8 text-right">
+                        {c.session_id ? (
+                          <Link
+                            href={`/calls/${encodeURIComponent(c.session_id)}`}
+                            className="text-sm font-medium text-blue-600 hover:text-blue-700"
+                          >
+                            Open →
+                          </Link>
+                        ) : (
+                          <span className="text-xs text-slate-300">—</span>
+                        )}
+                      </td>
                     </tr>
                     {playingId === c.id && c.recording_path && (
                       <tr key={`audio-${c.id}`}>
-                        <td colSpan={6} className="px-8 py-4 bg-slate-50 border-b border-slate-100">
-                          <div className="flex items-center gap-4">
-                            <span className="text-xs text-slate-500 font-medium">Recording:</span>
-                            <audio
-                              controls
-                              autoPlay
-                              src={`/api/audio?path=${encodeURIComponent(c.recording_path)}`}
-                              className="flex-1 h-9"
-                            />
-                          </div>
+                        <td colSpan={7} className="px-8 py-4 bg-slate-50 border-b border-slate-100">
+                          <AudioPlayer
+                            src={audioUrlForCall(c)}
+                            label="Session recording"
+                            detail={c.session_id ?? String(c.id)}
+                            autoPlay
+                            compact
+                          />
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 )) : (
                   <tr>
-                    <td colSpan={6} className="py-16 text-center text-sm text-slate-400">
+                    <td colSpan={7} className="py-16 text-center text-sm text-slate-400">
                       {search ? 'No calls match your search.' : 'No call records found.'}
                     </td>
                   </tr>

@@ -1,27 +1,36 @@
 "use client";
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { saveSession } from '@/lib/auth';
-import { apiLogin } from '@/lib/api';
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { loginUser } from "@/lib/auth";
 
 export default function Login() {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError]       = useState('');
-  const [loading, setLoading]   = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
   const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
+    setError("");
     setLoading(true);
+
     try {
-      const { token, role, username: user } = await apiLogin(username, password);
-      saveSession({ token, role, username: user });
-      router.push('/');
+      const session = await loginUser({ email, password });
+
+      if (session.role === "admin") {
+        router.push("/");
+      } else if (session.role === "da") {
+        router.push("/");
+      } else if (session.role === "expert") {
+        router.push("/helpdesk");
+      } else {
+        router.push("/");
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      setError(err instanceof Error ? err.message : "Login failed");
     } finally {
       setLoading(false);
     }
@@ -30,10 +39,9 @@ export default function Login() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
       <div className="w-full max-w-md bg-white rounded-xl shadow-sm border border-slate-200 p-8 sm:p-10">
-
         <div className="mb-8 text-center">
-          <div className="w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center mx-auto mb-4">
-            <span className="text-2xl">🌾</span>
+          <div className="w-14 h-14 bg-green-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <span className="text-3xl">🌾</span>
           </div>
           <h1 className="text-2xl font-semibold text-slate-900 mb-1">
             Farmer Advisor Admin
@@ -45,22 +53,29 @@ export default function Login() {
 
         <form onSubmit={handleSubmit} className="space-y-5">
           <div className="space-y-1.5">
-            <label htmlFor="username" className="text-sm font-medium text-slate-700">
-              Username
+            <label
+              htmlFor="email"
+              className="text-sm font-medium text-slate-700"
+            >
+              Email
             </label>
             <input
-              id="username"
-              type="text"
+              id="email"
+              type="email"
               required
-              autoComplete="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="admin@example.com"
               className="w-full h-10 px-3 rounded-md border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-colors"
             />
           </div>
 
           <div className="space-y-1.5">
-            <label htmlFor="password" className="text-sm font-medium text-slate-700">
+            <label
+              htmlFor="password"
+              className="text-sm font-medium text-slate-700"
+            >
               Password
             </label>
             <input
@@ -70,6 +85,7 @@ export default function Login() {
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
               className="w-full h-10 px-3 rounded-md border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-colors"
             />
           </div>
@@ -85,9 +101,13 @@ export default function Login() {
             disabled={loading}
             className="w-full h-10 mt-2 rounded-md bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-medium text-sm transition-colors"
           >
-            {loading ? 'Signing in…' : 'Sign In'}
+            {loading ? "Signing in…" : "Sign In"}
           </button>
         </form>
+
+        <p className="mt-6 text-center text-xs text-slate-400">
+          Default admin: <span className="font-mono text-slate-500">admin@example.com</span>
+        </p>
       </div>
     </div>
   );

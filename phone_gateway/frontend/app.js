@@ -28,6 +28,9 @@ const advisorTranscript = document.getElementById("advisorTranscript");
 const advisorResponse = document.getElementById("advisorResponse");
 
 let responseAudio = null;
+let playbackContext = null;
+let pcmSourceQueue = [];
+let pcmPlaying = false;
 
 document.addEventListener("DOMContentLoaded", () => {
   if (numberDisplay && !numberDisplay.value) {
@@ -281,6 +284,11 @@ async function startCall() {
     };
 
     websocket.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        playPCMChunk(new Int16Array(event.data));
+        return;
+      }
+
       try {
         const data = JSON.parse(event.data);
 
@@ -291,11 +299,43 @@ async function startCall() {
         }
 
         if (data.event === "speech_started") {
+          stopPCMPlayback();
           setStatus("Speaking...");
         }
 
         if (data.event === "speech_ended") {
-          setStatus("Listening...");
+          setStatus("Processing...");
+        }
+
+        if (data.event === "asr_started") {
+          setStatus("Transcribing...");
+        }
+
+        if (data.event === "asr_transcript") {
+          setStatus("Thinking...");
+          if (advisorPanel) advisorPanel.classList.remove("hidden");
+          if (advisorTranscript) {
+            advisorTranscript.innerText = data.transcript
+              ? `You: ${data.transcript}`
+              : "";
+          }
+        }
+
+        if (data.event === "rag_started") {
+          setStatus("Searching knowledge base...");
+        }
+
+        if (data.event === "rag_answer") {
+          if (advisorPanel) advisorPanel.classList.remove("hidden");
+          if (advisorResponse) {
+            advisorResponse.innerText = data.response
+              ? `Advisor: ${data.response}`
+              : "";
+          }
+        }
+
+        if (data.event === "tts_started") {
+          setStatus("Advisor speaking...");
         }
 
         if (data.type === "advisor_processing") {
@@ -431,6 +471,66 @@ function float32ToPCM16(float32Array) {
   return pcm16;
 }
 
+function ensurePlaybackContext() {
+  if (!playbackContext) {
+    playbackContext = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+  }
+  if (playbackContext.state === "suspended") {
+    playbackContext.resume();
+  }
+  return playbackContext;
+}
+
+function playPCMChunk(pcm16) {
+  if (!pcm16 || !pcm16.length) return;
+
+  const ctx = ensurePlaybackContext();
+  const float32 = new Float32Array(pcm16.length);
+
+  for (let i = 0; i < pcm16.length; i++) {
+    float32[i] = pcm16[i] / 32768;
+  }
+
+  const buffer = ctx.createBuffer(1, float32.length, TARGET_SAMPLE_RATE);
+  buffer.copyToChannel(float32, 0);
+
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(ctx.destination);
+  pcmSourceQueue.push(source);
+
+  if (!pcmPlaying) {
+    drainPCMQueue();
+  }
+}
+
+function drainPCMQueue() {
+  if (!pcmSourceQueue.length) {
+    pcmPlaying = false;
+    if (activeCall) {
+      setStatus("Listening...");
+    }
+    return;
+  }
+
+  pcmPlaying = true;
+  setStatus("Playing answer...");
+
+  const source = pcmSourceQueue.shift();
+  source.onended = () => drainPCMQueue();
+  source.start();
+}
+
+function stopPCMPlayback() {
+  pcmSourceQueue.forEach((source) => {
+    try {
+      source.stop();
+    } catch (e) {}
+  });
+  pcmSourceQueue = [];
+  pcmPlaying = false;
+}
+
 function showAdvisorResponse(data) {
   if (advisorPanel) {
     advisorPanel.classList.remove("hidden");
@@ -511,6 +611,7 @@ function endCall() {
 
   activeCall = false;
   stopTimer();
+  stopPCMPlayback();
 
   if (responseAudio) {
     responseAudio.pause();

@@ -49,7 +49,7 @@ LOGIC_SERVICE_URL = os.getenv(
     "LOGIC_SERVICE_URL",
     "http://host.docker.internal:8002",
 ).rstrip("/")
-VOICE_ASK_ENABLED = os.getenv("VOICE_ASK_ENABLED", "1").strip().lower() in {
+VOICE_ASK_ENABLED = os.getenv("VOICE_ASK_ENABLED", "0").strip().lower() in {
     "1",
     "true",
     "yes",
@@ -315,21 +315,23 @@ async def forward_vad_events_to_browser(
     caller_phone: str | None,
 ):
     """
-    Receive VAD events from vad-service.
-    Update backend monitor state.
-    Also forward VAD events to the caller browser for simple status updates.
-    On speech_ended, run the STT/RAG/TTS pipeline via logic_service.
+    Relay VAD JSON events and binary TTS PCM to the browser.
+    VAD orchestrates ASR → RAG → sentence TTS (no duplicate /voice/ask).
     """
 
     try:
         async for message in vad_ws:
+            if isinstance(message, bytes):
+                try:
+                    await browser_ws.send_bytes(message)
+                except Exception:
+                    break
+                continue
+
             try:
                 data = json.loads(message)
             except Exception:
-                data = {
-                    "event": "vad_raw_message",
-                    "message": message
-                }
+                data = {"event": "vad_raw_message", "message": message}
 
             print("[VAD EVENT]", data, flush=True)
 
@@ -343,21 +345,29 @@ async def forward_vad_events_to_browser(
 
             elif event_name == "speech_ended":
                 update_vad_status("speech_ended", data)
-
                 add_utterance(
                     utterance_path=data.get("utterance_path"),
                     duration_seconds=data.get("duration_seconds"),
                     speech_probability=data.get("speech_probability"),
                 )
 
-                asyncio.create_task(
-                    run_voice_ask_pipeline(
-                        utterance_path=data.get("utterance_path"),
-                        session_id=session_id,
-                        caller_phone=caller_phone,
-                        browser_ws=browser_ws,
-                    )
-                )
+            elif event_name == "asr_transcript":
+                add_event("asr_transcript", {
+                    "session_id": session_id,
+                    "transcript": data.get("transcript"),
+                    "confidence": data.get("confidence"),
+                })
+
+            elif event_name == "rag_answer":
+                add_event("advisor_response", {
+                    "session_id": session_id,
+                    "transcript": data.get("transcript"),
+                    "response": data.get("response"),
+                    "strategy": (data.get("meta") or {}).get("strategy"),
+                })
+
+            elif event_name == "tts_started":
+                add_event("tts_started", {"session_id": session_id})
 
             else:
                 add_event(event_name or "vad_event", data)
@@ -401,6 +411,7 @@ async def call_websocket(
         f"{VAD_WS_BASE_URL}"
         f"?session_id={session_id}"
         f"&sample_rate={sample_rate}"
+        f"&phone_number={caller_phone or 'Unknown'}"
     )
 
     vad_ws = None
@@ -499,6 +510,7 @@ async def call_websocket(
         if vad_ws:
             try:
                 await vad_ws.send(json.dumps({"event": "end_session"}))
+                await asyncio.sleep(5)
                 await vad_ws.close()
             except Exception:
                 pass

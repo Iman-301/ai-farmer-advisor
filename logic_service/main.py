@@ -28,6 +28,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("logic_service")
 
 
+def _warm_embedder() -> None:
+    try:
+        import rag_pg
+        rag_pg._get_embedder()
+        logger.info("Embedding model warmup complete.")
+    except Exception as exc:
+        logger.warning("Embedder warmup skipped: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -35,6 +44,8 @@ async def lifespan(app: FastAPI):
         rag_pg.init_pg_schema()
     except Exception as exc:
         logger.warning("Postgres KB init skipped: %s", exc)
+    import threading
+    threading.Thread(target=_warm_embedder, daemon=True, name="embedder-warmup").start()
     yield
 
 
@@ -53,6 +64,13 @@ RAG_PG_CANDIDATE_K = int(os.environ.get("RAG_PG_CANDIDATE_K", "24"))
 RAG_PG_FINAL_K = int(os.environ.get("RAG_PG_FINAL_K", "6"))
 # When top vector match is weaker than this, also retrieve on raw user text (no NLU hint).
 RAG_WEAK_MATCH_DISTANCE = float(os.environ.get("RAG_WEAK_MATCH_DISTANCE", "0.85"))
+# Voice fast path: compose locally from KB chunks; call LLM only when needed
+RAG_VOICE_COMPOSE_FIRST = os.environ.get("RAG_VOICE_COMPOSE_FIRST", "1").strip().lower() in (
+    "1", "true", "yes",
+)
+RAG_VOICE_ANSWER_MAX_CHARS = int(os.environ.get("RAG_VOICE_RAG_ANSWER_MAX_CHARS", "600"))
+RAG_RESPONSE_CACHE_TTL_SEC = int(os.environ.get("RAG_RESPONSE_CACHE_TTL_SEC", "0"))
+_response_cache: dict[str, tuple[float, tuple]] = {}
 
 # ── LLM Initialization (optional) ────────────────────────────────────────────
 #
@@ -663,14 +681,54 @@ def _strip_bad_citations(text: str) -> str:
     return cleaned.strip()
 
 
-def _answer_meta(answer_source: str) -> dict:
-    return {
+def _answer_meta(
+    answer_source: str,
+    *,
+    strategy: str | None = None,
+    best_distance: float | None = None,
+) -> dict:
+    src = (answer_source or "unknown").lower()
+    if strategy is None:
+        if src in ("llm", "gemini", "openai"):
+            strategy = "LLM"
+        elif src in ("rag", "rag_compose", "system"):
+            strategy = "RAG" if src != "system" else "STATIC"
+        else:
+            strategy = "RAG"
+    meta = {
         "answer_source": answer_source,
+        "strategy": strategy,
         "llm_status": llm_last_status.get("state", "not_used"),
         "llm_detail": (llm_last_status.get("detail") or "")[:300],
         "llm_api_calls": _llm_api_call_counter,
-        "gemini_api_calls": _gemini_call_counter,  # legacy field when provider=gemini
+        "gemini_api_calls": _gemini_call_counter,
     }
+    if best_distance is not None:
+        meta["best_distance"] = best_distance
+    return meta
+
+
+def _rag_cache_key(query_text: str, phone_number: str) -> str:
+    return f"{phone_number}:{(query_text or '').strip().lower()}"
+
+
+def _rag_cache_get(key: str):
+    if RAG_RESPONSE_CACHE_TTL_SEC <= 0:
+        return None
+    entry = _response_cache.get(key)
+    if not entry:
+        return None
+    ts, payload = entry
+    if time.time() - ts > RAG_RESPONSE_CACHE_TTL_SEC:
+        _response_cache.pop(key, None)
+        return None
+    return payload
+
+
+def _rag_cache_set(key: str, payload: tuple) -> None:
+    if RAG_RESPONSE_CACHE_TTL_SEC <= 0:
+        return
+    _response_cache[key] = (time.time(), payload)
 
 
 def _set_llm_status(state: str, detail: str = "") -> None:
@@ -1172,14 +1230,33 @@ def compose_grounded_answer_no_llm(query_text: str, hits: list[dict], max_chars:
 
 
 # ── Core RAG Pipeline ────────────────────────────────────────────────────────
-def generate_rag_response(query_text: str, phone_number: str, session_id: str):
+def generate_rag_response(
+    query_text: str,
+    phone_number: str,
+    session_id: str,
+    *,
+    voice_mode: bool = False,
+):
     """
-    Returns (response_text, intent, references, nlu_dict).
+    Returns (response_text, intent, references, nlu_dict, meta_dict).
     - intent: outcome label for routing (often same as NLU primary_intent for KB turns).
     - nlu_dict: { primary_intent, confidence, entities } from analyze_intent.
     """
     query_text = normalize_ethiopic_input((query_text or "").strip())
-    logger.info(f"Processing query for session={session_id} phone={phone_number}: '{query_text}'")
+    logger.info(
+        "Processing query session=%s phone=%s voice=%s: %r",
+        session_id,
+        phone_number,
+        voice_mode,
+        query_text,
+    )
+
+    cache_key = _rag_cache_key(query_text, phone_number)
+    cached = _rag_cache_get(cache_key)
+    if cached is not None:
+        logger.info("RAG cache hit for %r", query_text[:60])
+        return cached
+
     log_conversation(phone_number, session_id, "user", query_text)
 
     # ── Language Check ────────────────────────────────────────────────────────
@@ -1233,7 +1310,9 @@ def generate_rag_response(query_text: str, phone_number: str, session_id: str):
             enriched_query = f"{original_query} {query_text}".strip()
         else:
             enriched_query = query_text
-        return generate_rag_response(enriched_query, phone_number, session_id)
+        return generate_rag_response(
+            enriched_query, phone_number, session_id, voice_mode=voice_mode
+        )
 
     # ── Slot Filling Check ────────────────────────────────────────────────────
     clarification = needs_slot_filling(query_text, state, nlu)
@@ -1795,16 +1874,43 @@ def generate_rag_response(query_text: str, phone_number: str, session_id: str):
     history_str = "\n".join([f"{h[0]}: {h[1]}" for h in history])
 
     # ── LLM or Direct KB Response ─────────────────────────────────────────────
+    best_dist = float(hits[0].get("distance") or 999.0) if hits else 999.0
     response_text = None
-    if context:
-        response_text = generate_amharic_answer_llm(query_text, context, history_str, user_context)
+    answer_source = "rag"
+    strategy = "RAG"
 
-    answer_source = "llm"
+    if voice_mode and RAG_VOICE_COMPOSE_FIRST and use_pg and hits and best_dist <= RAG_WEAK_MATCH_DISTANCE:
+        composed = compose_grounded_answer_extractive(
+            query_text, hits, max_chars=RAG_VOICE_ANSWER_MAX_CHARS
+        )
+        if composed and len(composed.strip()) >= 40:
+            response_text = composed
+            answer_source = "rag_compose"
+            strategy = "RAG"
+            logger.info(
+                "Voice compose-first: skipped LLM (best_distance=%.3f, len=%d)",
+                best_dist,
+                len(composed),
+            )
+
+    if not response_text and context:
+        if voice_mode and RAG_VOICE_COMPOSE_FIRST and best_dist > RAG_WEAK_MATCH_DISTANCE:
+            logger.info(
+                "Voice mode: weak match (%.3f) — trying LLM once",
+                best_dist,
+            )
+        response_text = generate_amharic_answer_llm(query_text, context, history_str, user_context)
+        if response_text:
+            answer_source = "llm"
+            strategy = "LLM"
+
     if not response_text:
         answer_source = "rag"
+        strategy = "RAG"
         if use_pg and hits:
-            # Original RAG dump — no LLM, no extractive rewriting
-            response_text = compose_grounded_answer_no_llm(query_text, hits)
+            response_text = compose_grounded_answer_no_llm(
+                query_text, hits, max_chars=RAG_VOICE_ANSWER_MAX_CHARS if voice_mode else 3200
+            )
         else:
             response_text = "\n\n".join(
                 (h.get("content") or "") for h in hits[:3]
@@ -1813,14 +1919,17 @@ def generate_rag_response(query_text: str, phone_number: str, session_id: str):
         _is_insufficient_llm_answer(response_text)
         and use_pg
         and hits
-        and float(hits[0].get("distance") or 999.0) > RAG_WEAK_MATCH_DISTANCE
+        and best_dist > RAG_WEAK_MATCH_DISTANCE
     ):
         logger.info(
             "LLM returned insufficient answer; falling back to RAG chunks (distance=%.3f)",
-            float(hits[0].get("distance") or 999.0),
+            best_dist,
         )
-        response_text = compose_grounded_answer_no_llm(query_text, hits)
+        response_text = compose_grounded_answer_no_llm(
+            query_text, hits, max_chars=RAG_VOICE_ANSWER_MAX_CHARS if voice_mode else 3200
+        )
         answer_source = "rag"
+        strategy = "RAG"
 
     # ── High-Risk Safety Interceptor (FR12 / UC-05) ───────────────────────────
     if _requires_safety_confirmation(query_text, nlu):
@@ -1835,10 +1944,22 @@ def generate_rag_response(query_text: str, phone_number: str, session_id: str):
 
     final_response = alerts_text + _strip_bad_citations(normalize_text(response_text))
     log_conversation(phone_number, session_id, "assistant", final_response)
-    return final_response, intent, references, nlu.to_dict(), _answer_meta(answer_source)
+    meta = _answer_meta(answer_source, strategy=strategy, best_distance=best_dist if hits else None)
+    result = (final_response, intent, references, nlu.to_dict(), meta)
+    if voice_mode and answer_source in ("rag", "rag_compose", "system"):
+        _rag_cache_set(cache_key, result)
+    return result
 
 
 # ── API Endpoints ────────────────────────────────────────────────────────────
+
+class RagAnswerRequest(BaseModel):
+    text: str
+    session_id: str
+    phone_number: str = "Unknown"
+    voice_mode: bool = True
+    asr: dict | None = None
+
 
 @app.post("/ask")
 async def process_query(query: Query):
@@ -1849,6 +1970,27 @@ async def process_query(query: Query):
     if references:
         out["references"] = references
     return out
+
+
+@app.post("/rag/answer")
+async def rag_answer(req: RagAnswerRequest):
+    """Fast voice path used by vad_service (compose-first, shorter answers)."""
+    response_text, intent, references, nlu_out, meta = generate_rag_response(
+        req.text,
+        req.phone_number,
+        req.session_id,
+        voice_mode=req.voice_mode,
+    )
+    return {
+        "response": response_text,
+        "intent": intent,
+        "references": references or [],
+        "nlu": nlu_out,
+        "meta": meta,
+        "trust": {"grounding": meta.get("answer_source", "unknown")},
+        "best_distance": meta.get("best_distance"),
+        "strategy": meta.get("strategy"),
+    }
 
 
 @app.get("/repeat/{session_id}")

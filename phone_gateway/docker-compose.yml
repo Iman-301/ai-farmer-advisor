@@ -33,6 +33,7 @@ services:
       VAD_WS_BASE_URL: ws://vad-service:8010/ws/vad
       VAD_UTTERANCES_DIR: /app/utterances
       LOGIC_SERVICE_URL: http://host.docker.internal:8002
+      VOICE_ASK_ENABLED: "0"
     ports:
       - "8000:8000"
     extra_hosts:
@@ -56,11 +57,24 @@ services:
 
   vad-service:
     build:
-      context: ../vad_service
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: vad_service/Dockerfile
     container_name: vad_service
+    restart: unless-stopped
     ports:
       - "8010:8010"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ASR_HTTP_URL: http://host.docker.internal:8001/transcribe-file
+      RAG_SERVICE_URL: http://host.docker.internal:8002
+      TTS_SERVICE_URL: http://host.docker.internal:8003
+      VAD_UTTERANCES_DIR: /app/utterances
+      MAX_CONCURRENT_ASR: "2"
+      VAD_END_SILENCE_MS: "520"
+      VAD_TTS_CHUNK_MAX_CHARS: "140"
+      VAD_TTS_MAX_CHARS: "400"
+      VAD_TTS_MAX_SENTENCES: "4"
     volumes:
       - ../vad_service/utterances:/app/utterances
 

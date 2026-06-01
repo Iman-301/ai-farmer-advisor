@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { fetchFarmers } from '@/lib/api';
 import type { FarmerProfile } from '@/types';
 import { X } from 'lucide-react';
@@ -73,13 +74,19 @@ export default function FarmerProfiles() {
                     <td className="py-4 px-8 text-sm text-slate-600">
                       {f.registered_at ? new Date(f.registered_at).toLocaleDateString() : '—'}
                     </td>
-                    <td className="py-4 px-8 text-right">
+                    <td className="py-4 px-8 text-right space-x-4">
                       <button
                         onClick={() => setSelected(f)}
+                        className="text-sm font-medium text-slate-600 hover:text-slate-900"
+                      >
+                        Quick view
+                      </button>
+                      <Link
+                        href={`/farmers/${encodeURIComponent(f.phone_number)}`}
                         className="text-sm font-medium text-blue-600 hover:text-blue-700"
                       >
-                        View
-                      </button>
+                        Open →
+                      </Link>
                     </td>
                   </tr>
                 )) : (

@@ -35,7 +35,7 @@ export default function KnowledgeBase() {
     try {
       await addKBEntry({ intent: intent.trim(), response: response.trim() });
       setIntent(''); setResponse('');
-      showToast('Entry added to ChromaDB ✓');
+      showToast('Entry added to legacy ChromaDB ✓');
       load();
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Save failed');
@@ -70,7 +70,7 @@ export default function KnowledgeBase() {
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 mt-8 sticky top-8">
           {admin ? (
             <>
-              <h3 className="text-base font-medium text-slate-800 mb-6">Add KB Entry</h3>
+          <h3 className="text-base font-medium text-slate-800 mb-6">Add Legacy KB Entry</h3>
               <div className="space-y-4">
                 <div className="space-y-1.5">
                   <label htmlFor="kb-intent" className="text-sm font-medium text-slate-700">
@@ -104,7 +104,7 @@ export default function KnowledgeBase() {
                   disabled={saving || !intent.trim() || !response.trim()}
                   className="w-full h-10 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-sm font-medium rounded-md transition-colors"
                 >
-                  {saving ? 'Saving…' : 'Save to ChromaDB'}
+                  {saving ? 'Saving…' : 'Save to Legacy ChromaDB'}
                 </button>
               </div>
             </>
@@ -122,7 +122,7 @@ export default function KnowledgeBase() {
       <div className="lg:col-span-8">
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mt-8">
           <div className="px-8 py-6 border-b border-slate-100 flex items-center justify-between">
-            <h3 className="text-base font-medium text-slate-800">ChromaDB Entries</h3>
+            <h3 className="text-base font-medium text-slate-800">RAG Knowledge Base</h3>
             <Badge label={`${entries.length} Total`} variant="neutral" />
           </div>
 
@@ -147,7 +147,18 @@ export default function KnowledgeBase() {
                         {e.intent ?? e.id}
                       </code>
                     </div>
-                    {admin && (
+                    <div className="flex items-center gap-2">
+                      {e.source && (
+                        <Badge
+                          label={e.source === 'rag_pgvector' ? 'RAG DB' : 'Legacy'}
+                          variant={e.source === 'rag_pgvector' ? 'success' : 'neutral'}
+                        />
+                      )}
+                      {e.chunk_count != null && (
+                        <Badge label={`${e.chunk_count} chunks`} variant="info" />
+                      )}
+                    </div>
+                    {admin && e.source !== 'rag_pgvector' && (
                       <button
                         onClick={() => handleDelete(e.id)}
                         disabled={deleting === e.id}
@@ -157,6 +168,9 @@ export default function KnowledgeBase() {
                       </button>
                     )}
                   </div>
+                  {e.filename && (
+                    <p className="text-xs text-slate-400 mb-2 font-mono break-all">{e.filename}</p>
+                  )}
                   <p className="text-sm text-slate-600 leading-relaxed">
                     {(e.response ?? e.content ?? '').slice(0, 200)}
                     {((e.response ?? e.content ?? '').length > 200) ? '…' : ''}

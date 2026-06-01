@@ -14,7 +14,7 @@ class SileroStreamingVAD:
     Streaming Silero VAD engine.
 
     Expected input:
-    - 16 kHz
+    - 8 kHz or 16 kHz
     - mono
     - signed 16-bit PCM bytes
 
@@ -30,22 +30,38 @@ class SileroStreamingVAD:
         session_id: str,
         sample_rate: int = 16000,
         threshold: float = 0.5,
+        candidate_threshold: float | None = None,
+        continue_threshold: float | None = None,
+        energy_threshold: float = 0.012,
+        energy_min_speech_prob: float = 0.2,
         min_speech_start_ms: int = 120,
+        speech_start_gap_ms: int = 96,
         speech_end_silence_ms: int = 900,
         speech_pad_ms: int = 200,
         output_dir: str = "utterances",
     ):
         self.session_id = session_id
+        if sample_rate not in (8000, 16000):
+            raise ValueError(f"Unsupported VAD sample_rate={sample_rate}; expected 8000 or 16000")
+
         self.sample_rate = sample_rate
         self.threshold = threshold
+        self.candidate_threshold = (
+            candidate_threshold if candidate_threshold is not None else threshold * 0.75
+        )
+        self.continue_threshold = (
+            continue_threshold if continue_threshold is not None else threshold * 0.6
+        )
+        self.energy_threshold = energy_threshold
+        self.energy_min_speech_prob = energy_min_speech_prob
 
         self.min_speech_start_ms = min_speech_start_ms
+        self.speech_start_gap_ms = speech_start_gap_ms
         self.speech_end_silence_ms = speech_end_silence_ms
         self.speech_pad_ms = speech_pad_ms
 
-        # Silero commonly works well with 512 samples at 16 kHz.
-        # 512 samples = 32 ms at 16 kHz.
-        self.window_samples = 512
+        # Silero expects 256 samples at 8 kHz and 512 samples at 16 kHz.
+        self.window_samples = 256 if sample_rate == 8000 else 512
         self.window_bytes = self.window_samples * 2
 
         self.model = load_silero_vad()
@@ -55,6 +71,7 @@ class SileroStreamingVAD:
 
         self.is_speaking = False
         self.speech_candidate_ms = 0
+        self.speech_candidate_gap_ms = 0
         self.silence_ms = 0
 
         self.current_utterance = bytearray()
@@ -70,6 +87,7 @@ class SileroStreamingVAD:
         self.pending_bytes = bytearray()
         self.is_speaking = False
         self.speech_candidate_ms = 0
+        self.speech_candidate_gap_ms = 0
         self.silence_ms = 0
         self.current_utterance = bytearray()
         self.pre_speech_buffer = bytearray()
@@ -111,60 +129,77 @@ class SileroStreamingVAD:
         frame_ms = int((len(audio_float32) / self.sample_rate) * 1000)
         now = time.time()
 
-        is_speech = speech_prob >= self.threshold
+        rms_energy = float(np.sqrt(np.mean(np.square(audio_float32)))) if len(audio_float32) else 0.0
+        energy_speech = (
+            rms_energy >= self.energy_threshold
+            and speech_prob >= self.energy_min_speech_prob
+        )
+        start_speech = speech_prob >= self.threshold or energy_speech
+        candidate_speech = speech_prob >= self.candidate_threshold or energy_speech
+        continue_speech = speech_prob >= self.continue_threshold or energy_speech
 
         # Always keep a small pre-speech buffer so the beginning of speech is not cut.
         self._append_pre_speech(frame)
 
-        if is_speech:
+        if self.is_speaking:
+            if continue_speech:
+                self.silence_ms = 0
+            else:
+                self.silence_ms += frame_ms
+
+            self.current_utterance.extend(frame)
+
+            if self.silence_ms >= self.speech_end_silence_ms:
+                utterance_path = self._save_current_utterance()
+
+                duration_seconds = None
+                if self.speech_started_at:
+                    duration_seconds = round(now - self.speech_started_at, 2)
+
+                events.append({
+                    "event": "speech_ended",
+                    "timestamp": now,
+                    "utterance_path": utterance_path,
+                    "duration_seconds": duration_seconds,
+                    "speech_probability": round(speech_prob, 4),
+                    "rms_energy": round(rms_energy, 5),
+                })
+
+                self.is_speaking = False
+                self.silence_ms = 0
+                self.speech_candidate_ms = 0
+                self.speech_candidate_gap_ms = 0
+                self.speech_started_at = None
+                self.current_utterance = bytearray()
+
+        elif start_speech or (self.speech_candidate_ms > 0 and candidate_speech):
             self.silence_ms = 0
             self.speech_candidate_ms += frame_ms
+            self.speech_candidate_gap_ms = 0
 
-            if not self.is_speaking:
-                if self.speech_candidate_ms >= self.min_speech_start_ms:
-                    self.is_speaking = True
-                    self.speech_started_at = now
+            if self.speech_candidate_ms >= self.min_speech_start_ms:
+                self.is_speaking = True
+                self.speech_started_at = now
 
-                    # Include pre-speech audio at the beginning.
-                    self.current_utterance.extend(self.pre_speech_buffer)
-                    self.pre_speech_buffer = bytearray()
+                # Include pre-speech audio at the beginning.
+                self.current_utterance.extend(self.pre_speech_buffer)
+                self.pre_speech_buffer = bytearray()
 
-                    events.append({
-                        "event": "speech_started",
-                        "timestamp": now,
-                        "speech_probability": round(speech_prob, 4)
-                    })
+                events.append({
+                    "event": "speech_started",
+                    "timestamp": now,
+                    "speech_probability": round(speech_prob, 4),
+                    "rms_energy": round(rms_energy, 5),
+                })
 
-            if self.is_speaking:
                 self.current_utterance.extend(frame)
 
         else:
-            self.speech_candidate_ms = 0
-
-            if self.is_speaking:
-                self.silence_ms += frame_ms
-                self.current_utterance.extend(frame)
-
-                if self.silence_ms >= self.speech_end_silence_ms:
-                    utterance_path = self._save_current_utterance()
-
-                    duration_seconds = None
-                    if self.speech_started_at:
-                        duration_seconds = round(now - self.speech_started_at, 2)
-
-                    events.append({
-                        "event": "speech_ended",
-                        "timestamp": now,
-                        "utterance_path": utterance_path,
-                        "duration_seconds": duration_seconds,
-                        "speech_probability": round(speech_prob, 4)
-                    })
-
-                    self.is_speaking = False
-                    self.silence_ms = 0
+            if self.speech_candidate_ms > 0:
+                self.speech_candidate_gap_ms += frame_ms
+                if self.speech_candidate_gap_ms > self.speech_start_gap_ms:
                     self.speech_candidate_ms = 0
-                    self.speech_started_at = None
-                    self.current_utterance = bytearray()
+                    self.speech_candidate_gap_ms = 0
 
         return events
 

@@ -1,92 +1,109 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.responses import FileResponse
-from transformers import VitsModel, AutoTokenizer
-import torch
-import soundfile as sf
-import tempfile
 import os
 import logging
 import subprocess
+import tempfile
+import asyncio
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("tts_service")
 
 app = FastAPI()
+
+TTS_PROVIDER = (os.getenv("TTS_PROVIDER") or "gtts").strip().lower()
+TTS_LANG = os.getenv("TTS_LANG", "am")
+TTS_SAMPLE_RATE = int(os.getenv("TTS_SAMPLE_RATE", "16000"))
+TTS_ATEMPO = float(os.getenv("TTS_ATEMPO", "1.15"))
+TTS_SLOW = os.getenv("TTS_SLOW", "0").strip().lower() in ("1", "true", "yes")
 
 
 class TTSRequest(BaseModel):
     text: str
 
 
-MODEL_ID = "facebook/mms-tts-amh"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+def _synthesize_gtts_sync(text: str) -> str:
+    """gTTS → MP3 → ffmpeg → 16 kHz mono PCM WAV (fast path for voice calls)."""
+    from gtts import gTTS
 
-logger.info(f"Loading model {MODEL_ID} on {DEVICE}...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-model = VitsModel.from_pretrained(MODEL_ID).to(DEVICE)
-model.eval()
-logger.info("Model loaded successfully.")
+    mp3_fd, mp3_path = tempfile.mkstemp(suffix=".mp3")
+    os.close(mp3_fd)
+    wav_path = mp3_path.replace(".mp3", ".wav")
 
-
-def romanize_text(text: str) -> str:
-    """
-    MMS Amharic TTS works best with romanized input.
-    This uses the external `uroman` command if installed.
-    Falls back to the original text if romanization fails.
-    """
     try:
-        result = subprocess.run(
-            ["uroman"],
-            input=text,
-            text=True,
-            capture_output=True,
-            check=True
-        )
-        romanized = result.stdout.strip()
-        if romanized:
-            return romanized
-        return text
-    except Exception as e:
-        logger.warning(f"Romanization failed, using original text: {e}")
-        return text
+        gTTS(text=text, lang=TTS_LANG, slow=TTS_SLOW).save(mp3_path)
+
+        af_parts: list[str] = []
+        if TTS_ATEMPO and abs(TTS_ATEMPO - 1.0) > 0.01:
+            # atempo accepts 0.5–2.0 per filter; chain if needed
+            tempo = TTS_ATEMPO
+            while tempo > 2.0:
+                af_parts.append("atempo=2.0")
+                tempo /= 2.0
+            while tempo < 0.5:
+                af_parts.append("atempo=0.5")
+                tempo /= 0.5
+            if abs(tempo - 1.0) > 0.01:
+                af_parts.append(f"atempo={tempo:.3f}")
+
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", mp3_path,
+            "-ar", str(TTS_SAMPLE_RATE),
+            "-ac", "1",
+        ]
+        if af_parts:
+            cmd.extend(["-af", ",".join(af_parts)])
+        cmd.extend(["-f", "wav", wav_path])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or "ffmpeg failed")
+
+        return wav_path
+    finally:
+        if os.path.exists(mp3_path):
+            os.remove(mp3_path)
+
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "ok",
+        "provider": TTS_PROVIDER,
+        "lang": TTS_LANG,
+        "sample_rate": TTS_SAMPLE_RATE,
+        "atempo": TTS_ATEMPO,
+    }
 
 
 @app.post("/synthesize")
 async def synthesize(req: TTSRequest):
-    if not req.text.strip():
+    text = (req.text or "").strip()
+    if not text:
         raise HTTPException(status_code=400, detail="Text must not be empty.")
 
     try:
-        logger.info(f"Synthesizing speech for payload: {req.text}")
-
-        processed_text = romanize_text(req.text)
-        logger.info(f"Processed text: {processed_text}")
-
-        inputs = tokenizer(processed_text, return_tensors="pt").to(DEVICE)
-
-        with torch.no_grad():
-            output = model(**inputs).waveform
-
-        audio = output.squeeze().cpu().numpy()
-        sample_rate = model.config.sampling_rate
-
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        tmp_path = tmp.name
-        tmp.close()
-
-        sf.write(tmp_path, audio, sample_rate)
-        logger.info("Speech generation successful.")
+        logger.info("Synthesizing %d chars via %s", len(text), TTS_PROVIDER)
+        if TTS_PROVIDER == "gtts":
+            wav_path = await asyncio.to_thread(_synthesize_gtts_sync, text)
+        else:
+            raise HTTPException(
+                status_code=501,
+                detail=f"TTS provider {TTS_PROVIDER!r} not supported. Use TTS_PROVIDER=gtts.",
+            )
 
         return FileResponse(
-            tmp_path,
+            wav_path,
             media_type="audio/wav",
-            filename="response.wav"
+            filename="response.wav",
         )
-
-    except Exception as e:
-        logger.exception(f"TTS failed: {e}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("TTS failed: %s", exc)
         raise HTTPException(status_code=500, detail="TTS generation failed.")
