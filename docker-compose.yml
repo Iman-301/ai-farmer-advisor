@@ -61,8 +61,11 @@ services:
       # TTS: Google gTTS (fast) — sentence streaming in VAD handles perceived latency
       - TTS_MAX_CHARS=${TTS_MAX_CHARS:-400}
       - TTS_TIMEOUT_SECONDS=${TTS_TIMEOUT_SECONDS:-60}
-      # Voice RAG fast path
-      - RAG_VOICE_COMPOSE_FIRST=${RAG_VOICE_COMPOSE_FIRST:-1}
+      # Voice: Gemini first for quality; gTTS streaming keeps perceived latency low
+      - RAG_VOICE_LLM_FIRST=${RAG_VOICE_LLM_FIRST:-1}
+      - RAG_VOICE_COMPOSE_FIRST=${RAG_VOICE_COMPOSE_FIRST:-0}
+      - RAG_VOICE_LLM_MAX_TOKENS=${RAG_VOICE_LLM_MAX_TOKENS:-450}
+      - RAG_VOICE_PG_FINAL_K=${RAG_VOICE_PG_FINAL_K:-3}
       - RAG_VOICE_RAG_ANSWER_MAX_CHARS=${RAG_VOICE_RAG_ANSWER_MAX_CHARS:-600}
       - RAG_RESPONSE_CACHE_TTL_SEC=${RAG_RESPONSE_CACHE_TTL_SEC:-120}
       # LLM: longer, more expressive Amharic answers (1500 prevents mid-sentence cutoffs)

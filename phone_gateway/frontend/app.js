@@ -327,9 +327,14 @@ async function startCall() {
 
         if (data.event === "rag_answer") {
           if (advisorPanel) advisorPanel.classList.remove("hidden");
+          const src = (data.meta && data.meta.answer_source) || data.strategy || "";
+          const srcLabel =
+            src === "llm" ? " (Gemini)" :
+            src === "rag_compose" ? " (KB compose)" :
+            src === "rag" ? " (KB chunks)" : "";
           if (advisorResponse) {
             advisorResponse.innerText = data.response
-              ? `Advisor: ${data.response}`
+              ? `Advisor${srcLabel}: ${data.response}`
               : "";
           }
         }

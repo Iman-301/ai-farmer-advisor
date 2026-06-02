@@ -64,11 +64,16 @@ RAG_PG_CANDIDATE_K = int(os.environ.get("RAG_PG_CANDIDATE_K", "24"))
 RAG_PG_FINAL_K = int(os.environ.get("RAG_PG_FINAL_K", "6"))
 # When top vector match is weaker than this, also retrieve on raw user text (no NLU hint).
 RAG_WEAK_MATCH_DISTANCE = float(os.environ.get("RAG_WEAK_MATCH_DISTANCE", "0.85"))
-# Voice fast path: compose locally from KB chunks; call LLM only when needed
-RAG_VOICE_COMPOSE_FIRST = os.environ.get("RAG_VOICE_COMPOSE_FIRST", "1").strip().lower() in (
+# Voice: Gemini first for quality; compose/chunks only when LLM fails (keeps speed via gTTS streaming)
+RAG_VOICE_LLM_FIRST = os.environ.get("RAG_VOICE_LLM_FIRST", "1").strip().lower() in (
+    "1", "true", "yes",
+)
+RAG_VOICE_COMPOSE_FIRST = os.environ.get("RAG_VOICE_COMPOSE_FIRST", "0").strip().lower() in (
     "1", "true", "yes",
 )
 RAG_VOICE_ANSWER_MAX_CHARS = int(os.environ.get("RAG_VOICE_RAG_ANSWER_MAX_CHARS", "600"))
+RAG_VOICE_LLM_MAX_TOKENS = int(os.environ.get("RAG_VOICE_LLM_MAX_TOKENS", "450"))
+RAG_VOICE_PG_FINAL_K = int(os.environ.get("RAG_VOICE_PG_FINAL_K", "3"))
 RAG_RESPONSE_CACHE_TTL_SEC = int(os.environ.get("RAG_RESPONSE_CACHE_TTL_SEC", "0"))
 _response_cache: dict[str, tuple[float, tuple]] = {}
 
@@ -568,11 +573,25 @@ def _llm_system_prompt(qtype: str = "general") -> str:
     )
 
 
-def _llm_user_prompt(query_text: str, context: str, history_str: str, user_context: str) -> str:
+def _llm_user_prompt(
+    query_text: str,
+    context: str,
+    history_str: str,
+    user_context: str,
+    *,
+    voice_mode: bool = False,
+) -> str:
     ctx = _truncate_for_llm(f"{user_context}{context}")
     hist = _truncate_for_llm(history_str, max_chars=800) if history_str else ""
     hist_block = f"Conversation history:\n{hist}\n\n" if hist.strip() else ""
+    voice_note = (
+        "VOICE CALL: Answer the exact question in 3-6 clear Amharic sentences. "
+        "Put the direct answer first; no long lists unless the user asked for steps.\n\n"
+        if voice_mode
+        else ""
+    )
     return (
+        f"{voice_note}"
         f"CONTEXT (search this for the answer):\n{ctx}\n\n"
         f"{hist_block}"
         f"USER QUESTION: {query_text}\n\n"
@@ -580,7 +599,12 @@ def _llm_user_prompt(query_text: str, context: str, history_str: str, user_conte
     )
 
 
-def _call_gemini_model(model_name: str, prompt: str) -> Optional[str]:
+def _call_gemini_model(
+    model_name: str,
+    prompt: str,
+    *,
+    max_output_tokens: int | None = None,
+) -> Optional[str]:
     global _gemini_call_counter
     _gemini_call_counter += 1
     n = _gemini_call_counter
@@ -591,11 +615,12 @@ def _call_gemini_model(model_name: str, prompt: str) -> Optional[str]:
 
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(model_name)
+    token_limit = max_output_tokens or int(os.environ.get("LLM_MAX_TOKENS", "900"))
     resp = model.generate_content(
         prompt,
         generation_config=genai.types.GenerationConfig(
             temperature=0.2,
-            max_output_tokens=int(os.environ.get("LLM_MAX_TOKENS", "900")),
+            max_output_tokens=token_limit,
         ),
     )
     if getattr(resp, "candidates", None):
@@ -771,6 +796,9 @@ def generate_amharic_answer_llm(
     context: str,
     history_str: str,
     user_context: str,
+    *,
+    max_tokens: int | None = None,
+    voice_mode: bool = False,
 ) -> Optional[str]:
     """
     Returns a short, human-readable Amharic answer grounded in `context`.
@@ -784,7 +812,10 @@ def generate_amharic_answer_llm(
 
     qtype = _question_type(query_text)
     system_prompt = _llm_system_prompt(qtype)
-    user_prompt = _llm_user_prompt(query_text, context, history_str, user_context)
+    user_prompt = _llm_user_prompt(
+        query_text, context, history_str, user_context, voice_mode=voice_mode
+    )
+    token_limit = max_tokens or int(os.environ.get("LLM_MAX_TOKENS", "900"))
 
     if provider == "gemini":
         if not GEMINI_API_KEY:
@@ -812,7 +843,9 @@ def generate_amharic_answer_llm(
 
             for model_name in models:
                 try:
-                    out = _call_gemini_model(model_name, prompt)
+                    out = _call_gemini_model(
+                        model_name, prompt, max_output_tokens=token_limit
+                    )
                     if out:
                         llm_provider_active = f"gemini:{model_name}"
                         _set_llm_status("ok", model_name)
@@ -893,7 +926,7 @@ def generate_amharic_answer_llm(
                             model=OPENAI_MODEL,
                             messages=messages,
                             temperature=0.2,
-                            max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "900")),
+                            max_tokens=token_limit,
                             presence_penalty=float(os.environ.get("LLM_PRESENCE_PENALTY", "0.6")),
                             frequency_penalty=float(os.environ.get("LLM_FREQUENCY_PENALTY", "0.5")),
                         )
@@ -943,7 +976,7 @@ def generate_amharic_answer_llm(
                     model=OPENAI_MODEL,
                     messages=messages,
                     temperature=0.2,
-                    max_tokens=int(os.environ.get("LLM_MAX_TOKENS", "900")),
+                    max_tokens=token_limit,
                     presence_penalty=float(os.environ.get("LLM_PRESENCE_PENALTY", "0.6")),
                     frequency_penalty=float(os.environ.get("LLM_FREQUENCY_PENALTY", "0.5")),
                 )
@@ -982,7 +1015,9 @@ def generate_amharic_answer_llm(
                     prompt = f"{system_prompt}\n\n{user_prompt}"
                     for model_name in _gemini_models_to_try()[:1]:
                         try:
-                            out = _call_gemini_model(model_name, prompt)
+                            out = _call_gemini_model(
+                                model_name, prompt, max_output_tokens=token_limit
+                            )
                             if out:
                                 llm_provider_active = f"gemini-fallback:{model_name}"
                                 _set_llm_status(
@@ -1831,7 +1866,8 @@ def generate_rag_response(
             }
             for h in hits[:3]
         ]
-        context = _build_focused_context(query_text, hits[:3])
+        ctx_k = RAG_VOICE_PG_FINAL_K if voice_mode else 3
+        context = _build_focused_context(query_text, hits[:ctx_k])
     else:
         if not collection:
             add_to_escalation(query_text, "Chroma disabled and Postgres KB empty/unavailable.")
@@ -1878,8 +1914,41 @@ def generate_rag_response(
     response_text = None
     answer_source = "rag"
     strategy = "RAG"
+    voice_token_limit = RAG_VOICE_LLM_MAX_TOKENS if voice_mode else None
 
-    if voice_mode and RAG_VOICE_COMPOSE_FIRST and use_pg and hits and best_dist <= RAG_WEAK_MATCH_DISTANCE:
+    # Voice + Gemini first (default): synthesize from KB context, stay fast via short token cap
+    if voice_mode and RAG_VOICE_LLM_FIRST and context:
+        logger.info(
+            "Voice LLM-first: calling Gemini (best_distance=%.3f, max_tokens=%s)",
+            best_dist,
+            RAG_VOICE_LLM_MAX_TOKENS,
+        )
+        response_text = generate_amharic_answer_llm(
+            query_text,
+            context,
+            history_str,
+            user_context,
+            max_tokens=voice_token_limit,
+            voice_mode=True,
+        )
+        if response_text and not _is_insufficient_llm_answer(response_text):
+            answer_source = "llm"
+            strategy = "LLM"
+        else:
+            logger.info(
+                "Voice LLM-first: Gemini unavailable or insufficient; using compose fallback"
+            )
+            response_text = None
+
+    # Optional compose-first (RAG_VOICE_COMPOSE_FIRST=1): skip LLM when match is strong
+    if (
+        not response_text
+        and voice_mode
+        and RAG_VOICE_COMPOSE_FIRST
+        and use_pg
+        and hits
+        and best_dist <= RAG_WEAK_MATCH_DISTANCE
+    ):
         composed = compose_grounded_answer_extractive(
             query_text, hits, max_chars=RAG_VOICE_ANSWER_MAX_CHARS
         )
@@ -1893,13 +1962,16 @@ def generate_rag_response(
                 len(composed),
             )
 
-    if not response_text and context:
-        if voice_mode and RAG_VOICE_COMPOSE_FIRST and best_dist > RAG_WEAK_MATCH_DISTANCE:
-            logger.info(
-                "Voice mode: weak match (%.3f) — trying LLM once",
-                best_dist,
-            )
-        response_text = generate_amharic_answer_llm(query_text, context, history_str, user_context)
+    # Text / admin path, or voice when LLM-first disabled: standard LLM attempt
+    if not response_text and context and not (voice_mode and RAG_VOICE_LLM_FIRST):
+        response_text = generate_amharic_answer_llm(
+            query_text,
+            context,
+            history_str,
+            user_context,
+            max_tokens=voice_token_limit,
+            voice_mode=voice_mode,
+        )
         if response_text:
             answer_source = "llm"
             strategy = "LLM"
@@ -1908,27 +1980,32 @@ def generate_rag_response(
         answer_source = "rag"
         strategy = "RAG"
         if use_pg and hits:
-            response_text = compose_grounded_answer_no_llm(
-                query_text, hits, max_chars=RAG_VOICE_ANSWER_MAX_CHARS if voice_mode else 3200
+            composed = compose_grounded_answer_extractive(
+                query_text, hits, max_chars=RAG_VOICE_ANSWER_MAX_CHARS if voice_mode else 700
             )
+            if composed and len(composed.strip()) >= 40:
+                response_text = composed
+                answer_source = "rag_compose"
+            else:
+                response_text = compose_grounded_answer_no_llm(
+                    query_text, hits, max_chars=RAG_VOICE_ANSWER_MAX_CHARS if voice_mode else 3200
+                )
         else:
             response_text = "\n\n".join(
                 (h.get("content") or "") for h in hits[:3]
             ) or context or ""
-    elif (
-        _is_insufficient_llm_answer(response_text)
-        and use_pg
-        and hits
-        and best_dist > RAG_WEAK_MATCH_DISTANCE
-    ):
+    elif _is_insufficient_llm_answer(response_text) and use_pg and hits:
         logger.info(
             "LLM returned insufficient answer; falling back to RAG chunks (distance=%.3f)",
             best_dist,
         )
-        response_text = compose_grounded_answer_no_llm(
+        composed = compose_grounded_answer_extractive(
+            query_text, hits, max_chars=RAG_VOICE_ANSWER_MAX_CHARS if voice_mode else 700
+        )
+        response_text = composed or compose_grounded_answer_no_llm(
             query_text, hits, max_chars=RAG_VOICE_ANSWER_MAX_CHARS if voice_mode else 3200
         )
-        answer_source = "rag"
+        answer_source = "rag_compose" if composed else "rag"
         strategy = "RAG"
 
     # ── High-Risk Safety Interceptor (FR12 / UC-05) ───────────────────────────
