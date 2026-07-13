@@ -1,5 +1,9 @@
 # Voice-To-Voice Farmer Advisor System
 
+LINK TO THE DEMO
+<https://drive.google.com/drive/u/0/folders/1VbrVi4Q84341iEDDwYbv6WMAH4pbplp_> 
+
+
 This project implements a Voice-to-Voice Farmer Advisor System that provides agricultural information to farmers in Amharic via a voice-based interface. The system uses speech-to-text (STT) to understand queries, a logic service with RAG (Retrieval-Augmented Generation) to find relevant information, and text-to-speech (TTS) to deliver responses.
 
 ## 🚀 Features
@@ -126,5 +130,3 @@ Provides a web interface for:
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 
-LINK TO THE DEMO
-<https://drive.google.com/drive/u/0/folders/1VbrVi4Q84341iEDDwYbv6WMAH4pbplp_> 
